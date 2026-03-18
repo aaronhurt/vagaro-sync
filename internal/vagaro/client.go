@@ -39,6 +39,7 @@ type appointmentPayload struct {
 	AppointmentID            string `json:"appointmentId"`
 	BusinessID               string `json:"businessId"`
 	BusinessName             string `json:"businessName"`
+	Telephone                string `json:"telephone"`
 	ServiceTitle             string `json:"serviceTitle"`
 	ServiceProviderFirstName string `json:"serviceProviderFirstName"`
 	ServiceProviderLastName  string `json:"serviceProviderLastName"`
@@ -262,6 +263,7 @@ func normalizeAppointment(payload appointmentPayload) (Appointment, error) {
 	title := buildTitle(payload.ServiceTitle, payload.BusinessName)
 	notes := joinNonEmpty("\n",
 		prefixedValue("Business", payload.BusinessName),
+		prefixedValue("Telephone", payload.Telephone),
 		prefixedValue("Staff", staffName),
 		prefixedValue("Status", payload.AppStatusTitle),
 	)

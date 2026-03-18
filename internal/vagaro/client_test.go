@@ -45,6 +45,7 @@ func TestFetchUpcomingAppointmentsUsesTypedPayload(t *testing.T) {
 						AppointmentID:            "apt-1",
 						BusinessID:               "biz-1",
 						BusinessName:             "Salon One",
+						Telephone:                "555-0100",
 						ServiceTitle:             "Haircut - 45 mins",
 						ServiceProviderFirstName: "Taylor",
 						ServiceProviderLastName:  "Smith",
@@ -110,7 +111,7 @@ func TestFetchUpcomingAppointmentsUsesTypedPayload(t *testing.T) {
 	if got[0].Title != "Haircut - 45 mins @ Salon One" {
 		t.Fatalf("got[0].Title = %q", got[0].Title)
 	}
-	if got[0].Notes != "Business: Salon One\nStaff: Taylor Smith\nStatus: Accepted" {
+	if got[0].Notes != "Business: Salon One\nTelephone: 555-0100\nStaff: Taylor Smith\nStatus: Accepted" {
 		t.Fatalf("got[0].Notes = %q", got[0].Notes)
 	}
 	if got[0].EndTimeUTC.Sub(got[0].StartTimeUTC) != defaultDuration {
