@@ -1,0 +1,80 @@
+// Package state persists the local sync reconciliation state.
+package state
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/aaronhurt/vagaro-sync/internal/platform"
+)
+
+// AppointmentState stores the last synced calendar metadata for an appointment.
+type AppointmentState struct {
+	EventID    string    `json:"event_id"`
+	SourceHash string    `json:"source_hash"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// SyncState stores the full local reconciliation state.
+type SyncState struct {
+	Appointments map[string]AppointmentState `json:"appointments"`
+}
+
+// FileStore reads and writes sync state as JSON on disk.
+type FileStore struct {
+	path string
+}
+
+// NewFileStore returns a file-backed sync state store rooted at path.
+func NewFileStore(path string) *FileStore {
+	return &FileStore{path: path}
+}
+
+// Load returns the current sync state, treating a missing file as empty state.
+func (s *FileStore) Load() (SyncState, error) {
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return SyncState{Appointments: map[string]AppointmentState{}}, nil
+		}
+
+		return SyncState{}, fmt.Errorf("read sync state %q: %w", s.path, err)
+	}
+
+	var state SyncState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return SyncState{}, fmt.Errorf("decode sync state %q: %w", s.path, err)
+	}
+
+	if state.Appointments == nil {
+		state.Appointments = map[string]AppointmentState{}
+	}
+
+	return state, nil
+}
+
+// Save writes the provided sync state to disk.
+func (s *FileStore) Save(state SyncState) error {
+	if state.Appointments == nil {
+		state.Appointments = map[string]AppointmentState{}
+	}
+
+	if err := platform.EnsureParentDir(s.path); err != nil {
+		return err
+	}
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode sync state %q: %w", s.path, err)
+	}
+
+	data = append(data, '\n')
+	if err := os.WriteFile(s.path, data, 0o600); err != nil {
+		return fmt.Errorf("write sync state %q: %w", s.path, err)
+	}
+
+	return nil
+}
