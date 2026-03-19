@@ -52,13 +52,12 @@ func BuildPlan(appointments []vagaro.Appointment, current state.SyncState) Plan 
 		}
 		seen[appointment.AppointmentID] = struct{}{}
 
-		previous, ok := current.Appointments[appointment.AppointmentID]
-		switch {
-		case !ok:
+		if _, ok := current.Appointments[appointment.AppointmentID]; !ok {
 			plan.Creates = append(plan.Creates, event)
-		case previous.SourceHash != appointment.SourceHash:
-			plan.Updates = append(plan.Updates, event)
+			continue
 		}
+
+		plan.Updates = append(plan.Updates, event)
 	}
 
 	for sourceID, previous := range current.Appointments {
