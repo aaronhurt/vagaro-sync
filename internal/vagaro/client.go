@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +28,14 @@ const (
 	requestVersion           = "2.5.3"
 	successResponseCode      = 1000
 )
+
+// ErrAuthenticationInvalid reports an unusable Vagaro auth token.
+var ErrAuthenticationInvalid = errors.New("authentication invalid")
+
+// IsAuthenticationInvalid reports whether err wraps ErrAuthenticationInvalid.
+func IsAuthenticationInvalid(err error) bool {
+	return errors.Is(err, ErrAuthenticationInvalid)
+}
 
 // Client fetches upcoming appointments from Vagaro using a captured auth bundle.
 type Client struct {
@@ -64,7 +74,7 @@ type Appointment struct {
 	EndTimeUTC    time.Time
 }
 
-type fetchAppointmentsRequest struct {
+type appointmentsRequest struct {
 	PageSize               int    `json:"pageSize"`
 	PageNumber             int    `json:"pageNumber"`
 	PastAppointment        bool   `json:"pastAppointment"`
@@ -77,11 +87,15 @@ type fetchAppointmentsRequest struct {
 	AppNo                  *int   `json:"appNo"`
 }
 
-type fetchAppointmentsResponse struct {
+type appointmentsResponse struct {
 	Status       int                  `json:"status"`
 	ResponseCode int                  `json:"responseCode"`
 	Message      string               `json:"message"`
 	Data         []appointmentPayload `json:"data"`
+}
+
+type jwtClaims struct {
+	Exp json.Number `json:"exp"`
 }
 
 type syncHashInput struct {
@@ -115,6 +129,36 @@ func NewClient(bundle storage.AuthBundle) (*Client, error) {
 		sUToken:    bundle.SUToken,
 		userAgent:  bundle.UserAgent,
 	}, nil
+}
+
+// ValidateAuthBundle enforces the currently known JWT-based Vagaro auth token contract.
+func ValidateAuthBundle(bundle storage.AuthBundle, now time.Time) error {
+	token := strings.TrimSpace(bundle.SUToken)
+	if token == "" {
+		return fmt.Errorf("%w: missing s_utkn", ErrAuthenticationInvalid)
+	}
+
+	claims, err := decodeJWTClaims(token)
+	if err != nil {
+		return fmt.Errorf("%w: invalid JWT: %v", ErrAuthenticationInvalid, err)
+	}
+
+	expUnix, err := claims.Exp.Int64()
+	if err != nil {
+		return fmt.Errorf("%w: missing or invalid exp claim", ErrAuthenticationInvalid)
+	}
+
+	if now.UTC().Unix() >= expUnix {
+		return fmt.Errorf("%w: token expired at %s", ErrAuthenticationInvalid, time.Unix(expUnix, 0).UTC().Format(time.RFC3339))
+	}
+
+	return nil
+}
+
+// ProbeSession validates the currently stored session using the appointments endpoint contract.
+func (c *Client) ProbeSession(ctx context.Context) error {
+	_, _, err := c.fetchAppointmentsResponse(ctx, 1, 1)
+	return err
 }
 
 // FetchUpcomingAppointments fetches and normalizes upcoming appointments across all pages.
@@ -160,7 +204,58 @@ func (c *Client) fetchUpcomingAppointmentsPage(
 	pageNumber int,
 	pageSize int,
 ) ([]appointmentPayload, int, error) {
-	payload, err := json.Marshal(fetchAppointmentsRequest{
+	decoded, body, err := c.fetchAppointmentsResponse(ctx, pageNumber, pageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, 0, fmt.Errorf("decode appointments page %d: empty response body", pageNumber)
+	}
+
+	return decoded.Data, totalPages(decoded.Data), nil
+}
+
+func (c *Client) fetchAppointmentsResponse(
+	ctx context.Context,
+	pageNumber int,
+	pageSize int,
+) (appointmentsResponse, []byte, error) {
+	req, err := c.newAppointmentsRequest(ctx, pageNumber, pageSize)
+	if err != nil {
+		return appointmentsResponse{}, nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return appointmentsResponse{}, nil, fmt.Errorf("fetch appointments page %d: %w", pageNumber, err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return appointmentsResponse{}, nil, fmt.Errorf("read appointments page %d: %w", pageNumber, err)
+	}
+
+	if err := classifyHTTPResponse("fetch appointments page", pageNumber, resp); err != nil {
+		return appointmentsResponse{}, nil, err
+	}
+
+	decoded, err := decodeAppointmentsResponse(pageNumber, body)
+	if err != nil {
+		return appointmentsResponse{}, nil, err
+	}
+
+	return decoded, body, nil
+}
+
+func (c *Client) newAppointmentsRequest(
+	ctx context.Context,
+	pageNumber int,
+	pageSize int,
+) (*http.Request, error) {
+	payload, err := json.Marshal(appointmentsRequest{
 		PageSize:               pageSize,
 		PageNumber:             pageNumber,
 		PastAppointment:        false,
@@ -173,13 +268,13 @@ func (c *Client) fetchUpcomingAppointmentsPage(
 		AppNo:                  nil,
 	})
 	if err != nil {
-		return nil, 0, fmt.Errorf("encode appointments page request: %w", err)
+		return nil, fmt.Errorf("encode appointments page request: %w", err)
 	}
 
 	endpoint := c.baseURL + appointmentsEndpointPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return nil, 0, fmt.Errorf("build appointments page request: %w", err)
+		return nil, fmt.Errorf("build appointments page request: %w", err)
 	}
 
 	req.Header.Set("Accept", "application/json")
@@ -191,32 +286,31 @@ func (c *Client) fetchUpcomingAppointmentsPage(
 		req.Header.Set("User-Agent", c.userAgent)
 	}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("fetch appointments page %d: %w", pageNumber, err)
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
+	return req, nil
+}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, 0, fmt.Errorf("read appointments page %d: %w", pageNumber, err)
+func classifyHTTPResponse(operation string, pageNumber int, resp *http.Response) error {
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("%w: %s %d returned %s", ErrAuthenticationInvalid, operation, pageNumber, resp.Status)
+	case http.StatusOK:
+		return nil
+	default:
+		return fmt.Errorf("%s %d: %s", operation, pageNumber, resp.Status)
 	}
+}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, 0, fmt.Errorf("fetch appointments page %d: %s", pageNumber, resp.Status)
-	}
+func decodeAppointmentsResponse(pageNumber int, body []byte) (appointmentsResponse, error) {
 	if len(bytes.TrimSpace(body)) == 0 {
-		return nil, 0, fmt.Errorf("decode appointments page %d: empty response body", pageNumber)
+		return appointmentsResponse{}, fmt.Errorf("decode appointments page %d: empty response body", pageNumber)
 	}
 
-	var decoded fetchAppointmentsResponse
+	var decoded appointmentsResponse
 	if err := json.Unmarshal(body, &decoded); err != nil {
-		return nil, 0, fmt.Errorf("decode appointments page %d: %w", pageNumber, err)
+		return appointmentsResponse{}, fmt.Errorf("decode appointments page %d: %w", pageNumber, err)
 	}
 	if decoded.Status != http.StatusOK || decoded.ResponseCode != successResponseCode {
-		return nil, 0, fmt.Errorf(
+		return appointmentsResponse{}, fmt.Errorf(
 			"fetch appointments page %d: status=%d responseCode=%d message=%q",
 			pageNumber,
 			decoded.Status,
@@ -225,7 +319,29 @@ func (c *Client) fetchUpcomingAppointmentsPage(
 		)
 	}
 
-	return decoded.Data, totalPages(decoded.Data), nil
+	return decoded, nil
+}
+
+func decodeJWTClaims(token string) (jwtClaims, error) {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 3 {
+		return jwtClaims{}, fmt.Errorf("expected 3 JWT segments")
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return jwtClaims{}, fmt.Errorf("decode payload: %w", err)
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+
+	var claims jwtClaims
+	if err := decoder.Decode(&claims); err != nil {
+		return jwtClaims{}, fmt.Errorf("decode claims: %w", err)
+	}
+
+	return claims, nil
 }
 
 // NormalizeAppointments converts typed Vagaro payloads into the normalized appointment model.

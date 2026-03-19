@@ -9,14 +9,23 @@ import (
 	"github.com/aaronhurt/vagaro-sync/internal/storage"
 )
 
+type authStore interface {
+	Delete(context.Context) error
+}
+
 // Command runs the auth-clear flow.
 type Command struct {
-	AuthStore storage.AuthStore
+	authStore authStore
+}
+
+// NewCommand constructs the auth-clear command.
+func NewCommand(store *storage.KeychainStore) *Command {
+	return &Command{authStore: store}
 }
 
 // Run executes the auth-clear command.
 func (c *Command) Run(ctx context.Context, _ []string) error {
-	if err := c.AuthStore.Delete(ctx); err != nil {
+	if err := c.authStore.Delete(ctx); err != nil {
 		return err
 	}
 

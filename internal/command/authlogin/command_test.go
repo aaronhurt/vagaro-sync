@@ -2,6 +2,8 @@ package authlogin
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -9,67 +11,78 @@ import (
 	"github.com/aaronhurt/vagaro-sync/internal/storage"
 )
 
-type fakeBackend struct{}
+type fakeBackend struct {
+	bundle storage.AuthBundle
+}
 
 func (f fakeBackend) Authenticate(context.Context, string) (storage.AuthBundle, error) {
-	return storage.AuthBundle{}, nil
+	return f.bundle, nil
+}
+
+type fakeBrowserFactory struct {
+	timeout time.Duration
+	backend browserAuthenticator
+}
+
+func (f *fakeBrowserFactory) New(opts browser.ChromeOptions) (browserAuthenticator, error) {
+	f.timeout = opts.Timeout
+	return f.backend, nil
 }
 
 func TestCommandRunStoresAuthenticatedBundle(t *testing.T) {
 	var (
-		gotTimeout time.Duration
-		saved      storage.AuthBundle
-		probed     storage.AuthBundle
+		saved storage.AuthBundle
 	)
-
-	origNewChromeBackend := newChromeBackend
-	origLoginWithBackend := loginWithBackend
-	origProbeAppointments := probeAppointments
-	t.Cleanup(func() {
-		newChromeBackend = origNewChromeBackend
-		loginWithBackend = origLoginWithBackend
-		probeAppointments = origProbeAppointments
-	})
 
 	storeSave := func(_ context.Context, bundle storage.AuthBundle) error {
 		saved = bundle
 		return nil
 	}
 
+	backend := fakeBackend{
+		bundle: storage.AuthBundle{SUToken: testJWT(t, time.Now().Add(5*time.Minute))},
+	}
+	factory := &fakeBrowserFactory{backend: backend}
 	cmd := &Command{
-		AuthStore: authStoreStub{
-			save: storeSave,
-		},
-	}
-
-	newChromeBackend = func(opts browser.ChromeOptions) (browser.Backend, error) {
-		gotTimeout = opts.Timeout
-		return fakeBackend{}, nil
-	}
-	loginWithBackend = func(_ context.Context, backend browser.Backend) (storage.AuthBundle, error) {
-		if _, ok := backend.(fakeBackend); !ok {
-			t.Fatalf("backend = %#v, want fakeBackend", backend)
-		}
-
-		return storage.AuthBundle{SUToken: "token"}, nil
-	}
-	probeAppointments = func(_ context.Context, bundle storage.AuthBundle) error {
-		probed = bundle
-		return nil
+		authStore:      authStoreStub{save: storeSave},
+		browserFactory: factory,
+		now:            time.Now,
 	}
 
 	if err := cmd.Run(context.Background(), []string{"-timeout=5m"}); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if gotTimeout != 5*time.Minute {
-		t.Fatalf("timeout = %s, want %s", gotTimeout, 5*time.Minute)
+	if factory.timeout != 5*time.Minute {
+		t.Fatalf("timeout = %s, want %s", factory.timeout, 5*time.Minute)
 	}
-	if saved.SUToken != "token" {
+	if saved.SUToken != backend.bundle.SUToken {
 		t.Fatalf("saved bundle = %+v", saved)
 	}
-	if probed.SUToken != "token" {
-		t.Fatalf("probed bundle = %+v", probed)
+}
+
+func TestCommandRunRejectsInvalidCapturedToken(t *testing.T) {
+	t.Parallel()
+
+	saved := false
+	cmd := &Command{
+		authStore: authStoreStub{
+			save: func(context.Context, storage.AuthBundle) error {
+				saved = true
+				return nil
+			},
+		},
+		browserFactory: &fakeBrowserFactory{
+			backend: fakeBackend{bundle: storage.AuthBundle{SUToken: "not-a-jwt"}},
+		},
+		now: time.Now,
+	}
+
+	if err := cmd.Run(context.Background(), nil); err == nil {
+		t.Fatal("expected invalid JWT error")
+	}
+	if saved {
+		t.Fatal("expected invalid captured token not to be saved")
 	}
 }
 
@@ -87,4 +100,27 @@ func (s authStoreStub) Save(ctx context.Context, bundle storage.AuthBundle) erro
 
 func (s authStoreStub) Delete(context.Context) error {
 	return nil
+}
+
+func testJWT(t *testing.T, exp time.Time) string {
+	t.Helper()
+
+	header, err := json.Marshal(map[string]string{
+		"alg": "HS256",
+		"typ": "JWT",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(header) error = %v", err)
+	}
+	payload, err := json.Marshal(map[string]int64{
+		"exp": exp.UTC().Unix(),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+
+	return base64.RawURLEncoding.EncodeToString(header) +
+		"." +
+		base64.RawURLEncoding.EncodeToString(payload) +
+		".signature"
 }

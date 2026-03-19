@@ -45,23 +45,19 @@ var availableCommands = []commandSpec{
 func newCommand(name string) (runner, bool, error) {
 	switch name {
 	case "auth-login":
-		return &authlogincmd.Command{
-			AuthStore: storage.NewKeychainStore(storage.DefaultKeychainService, storage.DefaultKeychainAccount),
-		}, true, nil
+		return authlogincmd.NewCommand(storage.NewKeychainStore(storage.DefaultKeychainService, storage.DefaultKeychainAccount)), true, nil
 	case "auth-clear":
-		return &authclearcmd.Command{
-			AuthStore: storage.NewKeychainStore(storage.DefaultKeychainService, storage.DefaultKeychainAccount),
-		}, true, nil
+		return authclearcmd.NewCommand(storage.NewKeychainStore(storage.DefaultKeychainService, storage.DefaultKeychainAccount)), true, nil
 	case "sync":
 		statePath, err := platform.DefaultStatePath()
 		if err != nil {
 			return nil, true, err
 		}
 
-		return &synccmd.Command{
-			AuthStore:  storage.NewKeychainStore(storage.DefaultKeychainService, storage.DefaultKeychainAccount),
-			StateStore: state.NewFileStore(statePath),
-		}, true, nil
+		return synccmd.NewCommand(
+			storage.NewKeychainStore(storage.DefaultKeychainService, storage.DefaultKeychainAccount),
+			state.NewFileStore(statePath),
+		), true, nil
 	case "version":
 		return &versioncmd.Command{Version: buildVersion}, true, nil
 	default:

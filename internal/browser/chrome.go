@@ -1,3 +1,4 @@
+// Package browser provides browser-backed authentication helpers.
 package browser
 
 import (
@@ -30,6 +31,7 @@ type ChromeOptions struct {
 type ChromeBackend struct {
 	executablePath string
 	timeout        time.Duration
+	currentBundle  func(context.Context) (storage.AuthBundle, error)
 }
 
 // NewChromeBackend constructs a Chrome-backed browser authenticator.
@@ -51,6 +53,7 @@ func NewChromeBackend(opts ChromeOptions) (*ChromeBackend, error) {
 	return &ChromeBackend{
 		executablePath: executablePath,
 		timeout:        timeout,
+		currentBundle:  currentAuthBundle,
 	}, nil
 }
 
@@ -106,8 +109,11 @@ func (b *ChromeBackend) waitForAuthenticatedSession(ctx context.Context) (storag
 	defer ticker.Stop()
 
 	for {
-		bundle, bundleErr := currentAuthBundle(ctx)
-		if bundleErr == nil && authSessionReady(bundle) {
+		bundle, err := b.currentBundle(ctx)
+		if err != nil {
+			return storage.AuthBundle{}, fmt.Errorf("read authenticated session cookies: %w", err)
+		}
+		if authSessionReady(bundle) {
 			return bundle, nil
 		}
 

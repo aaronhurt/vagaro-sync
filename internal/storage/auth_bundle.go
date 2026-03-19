@@ -2,7 +2,6 @@
 package storage
 
 import (
-	"context"
 	"time"
 )
 
@@ -17,11 +16,4 @@ type AuthBundle struct {
 	CapturedAt time.Time `json:"captured_at"`
 	SUToken    string    `json:"s_utkn"`
 	UserAgent  string    `json:"user_agent"`
-}
-
-// AuthStore persists and retrieves authentication bundles.
-type AuthStore interface {
-	Load(context.Context) (AuthBundle, error)
-	Save(context.Context, AuthBundle) error
-	Delete(context.Context) error
 }
