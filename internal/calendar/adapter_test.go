@@ -2,6 +2,7 @@ package calendar
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -100,5 +101,28 @@ func TestHasEventPassesExpectedInput(t *testing.T) {
 	}
 	if runner.lastInput.EventURL != "vagaro-sync://appointment/apt-1" {
 		t.Fatalf("EventURL = %q", runner.lastInput.EventURL)
+	}
+}
+
+func TestJXAScriptExpandsEventRangeBeforeApplyingFinalTimes(t *testing.T) {
+	t.Parallel()
+
+	expectedSnippets := []string{
+		"var desiredStart = new Date(payload.start_time_utc);",
+		"var desiredEnd = new Date(payload.end_time_utc);",
+		"var currentStart = event.startDate();",
+		"var currentEnd = event.endDate();",
+		"var expandedStart = currentStart < desiredStart ? currentStart : desiredStart;",
+		"var expandedEnd = currentEnd > desiredEnd ? currentEnd : desiredEnd;",
+		"event.startDate = expandedStart;",
+		"event.endDate = expandedEnd;",
+		"event.startDate = desiredStart;",
+		"event.endDate = desiredEnd;",
+	}
+
+	for _, snippet := range expectedSnippets {
+		if !strings.Contains(jxaScript, snippet) {
+			t.Fatalf("jxaScript missing snippet %q", snippet)
+		}
 	}
 }
