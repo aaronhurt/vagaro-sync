@@ -110,7 +110,7 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 
 	_, err = fmt.Fprintf(
 		os.Stdout,
-		"synced %d appointments: %d created, %d updated, %d deleted\n",
+		"synced %d appointments: %d created, %d synced, %d deleted\n",
 		len(appointments),
 		len(plan.Creates),
 		len(plan.Updates),

@@ -64,3 +64,41 @@ func TestBuildPlanProducesCreateUpdateDeleteSets(t *testing.T) {
 		t.Fatalf("Deletes[0].EventURL = %q", plan.Deletes[0].EventURL)
 	}
 }
+
+func TestBuildPlanUpdatesExistingAppointmentWhenSourceIsUnchanged(t *testing.T) {
+	t.Parallel()
+
+	appointments := []vagaro.Appointment{
+		{
+			AppointmentID: "apt-1",
+			SourceHash:    "hash-1",
+			Title:         "Haircut",
+			StartTimeUTC:  time.Date(2026, time.March, 18, 15, 0, 0, 0, time.UTC),
+			EndTimeUTC:    time.Date(2026, time.March, 18, 16, 0, 0, 0, time.UTC),
+		},
+	}
+
+	current := state.SyncState{
+		Appointments: map[string]state.AppointmentState{
+			"apt-1": {
+				EventID:    "vagaro-sync://appointment/apt-1",
+				SourceHash: "hash-1",
+			},
+		},
+	}
+
+	plan := BuildPlan(appointments, current)
+
+	if len(plan.Creates) != 0 {
+		t.Fatalf("len(Creates) = %d, want 0", len(plan.Creates))
+	}
+	if len(plan.Updates) != 1 {
+		t.Fatalf("len(Updates) = %d, want 1", len(plan.Updates))
+	}
+	if plan.Updates[0].URL != "vagaro-sync://appointment/apt-1" {
+		t.Fatalf("Updates[0].URL = %q", plan.Updates[0].URL)
+	}
+	if len(plan.Deletes) != 0 {
+		t.Fatalf("len(Deletes) = %d, want 0", len(plan.Deletes))
+	}
+}
