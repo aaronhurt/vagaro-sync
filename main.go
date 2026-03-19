@@ -13,7 +13,7 @@ var buildVersion = ""
 
 func main() {
 	if err := run(context.Background(), os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "vagaro-sync: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "vagaro-sync: %v\n", err)
 		os.Exit(1)
 	}
 }

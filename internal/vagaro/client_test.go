@@ -2,11 +2,17 @@ package vagaro
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/aaronhurt/vagaro-sync/internal/storage"
 )
 
 func TestFetchUpcomingAppointmentsUsesTypedPayload(t *testing.T) {
@@ -26,7 +32,7 @@ func TestFetchUpcomingAppointmentsUsesTypedPayload(t *testing.T) {
 			t.Fatalf("s_utkn = %q, want token", got)
 		}
 
-		var req fetchAppointmentsRequest
+		var req appointmentsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("Decode() error = %v", err)
 		}
@@ -36,7 +42,7 @@ func TestFetchUpcomingAppointmentsUsesTypedPayload(t *testing.T) {
 
 		switch req.PageNumber {
 		case 1:
-			writeJSON(t, w, fetchAppointmentsResponse{
+			writeJSON(t, w, appointmentsResponse{
 				Status:       http.StatusOK,
 				ResponseCode: successResponseCode,
 				Message:      "Success",
@@ -66,7 +72,7 @@ func TestFetchUpcomingAppointmentsUsesTypedPayload(t *testing.T) {
 				},
 			})
 		case 2:
-			writeJSON(t, w, fetchAppointmentsResponse{
+			writeJSON(t, w, appointmentsResponse{
 				Status:       http.StatusOK,
 				ResponseCode: successResponseCode,
 				Message:      "Success",
@@ -126,7 +132,7 @@ func TestFetchUpcomingAppointmentsDefaultsDurationWhenEndTimeMissing(t *testing.
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(t, w, fetchAppointmentsResponse{
+		writeJSON(t, w, appointmentsResponse{
 			Status:       http.StatusOK,
 			ResponseCode: successResponseCode,
 			Message:      "Success",
@@ -160,6 +166,102 @@ func TestFetchUpcomingAppointmentsDefaultsDurationWhenEndTimeMissing(t *testing.
 	}
 	if got[0].EndTimeUTC.Sub(got[0].StartTimeUTC) != defaultDuration {
 		t.Fatalf("duration = %s, want %s", got[0].EndTimeUTC.Sub(got[0].StartTimeUTC), defaultDuration)
+	}
+}
+
+func TestFetchUpcomingAppointmentsClassifiesAuthFailures(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	client := &Client{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+		sUToken:    "token",
+	}
+
+	err := client.ProbeSession(context.Background())
+	if !IsAuthenticationInvalid(err) {
+		t.Fatalf("ProbeSession() error = %v, want auth invalid", err)
+	}
+}
+
+func TestValidateAuthBundle(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.March, 18, 12, 0, 0, 0, time.UTC)
+
+	testCases := []struct {
+		name     string
+		token    string
+		wantAuth bool
+	}{
+		{name: "missing", token: "", wantAuth: true},
+		{name: "malformed", token: "not-a-jwt", wantAuth: true},
+		{name: "missing-exp", token: testJWT(t, map[string]any{"sub": "abc"}), wantAuth: true},
+		{name: "expired", token: testJWT(t, map[string]any{"exp": now.Add(-time.Minute).Unix()}), wantAuth: true},
+		{name: "valid", token: testJWT(t, map[string]any{"exp": now.Add(time.Minute).Unix()}), wantAuth: false},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := ValidateAuthBundle(storage.AuthBundle{SUToken: tc.token}, now)
+			if tc.wantAuth {
+				if !IsAuthenticationInvalid(err) {
+					t.Fatalf("ValidateAuthBundle() error = %v, want auth invalid", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateAuthBundle() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestDecodeAppointmentsResponseFixtures(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		file    string
+		wantErr string
+	}{
+		{name: "success", file: "appointments_success.json"},
+		{name: "empty", file: "appointments_empty.json", wantErr: "empty response body"},
+		{name: "malformed", file: "appointments_malformed.json", wantErr: "invalid character"},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			body, err := os.ReadFile(filepath.Join("testdata", tc.file))
+			if err != nil {
+				t.Fatalf("os.ReadFile() error = %v", err)
+			}
+
+			decoded, err := decodeAppointmentsResponse(1, body)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("decodeAppointmentsResponse() error = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decodeAppointmentsResponse() error = %v", err)
+			}
+			if len(decoded.Data) != 1 || decoded.Data[0].AppointmentID != "apt-1" {
+				t.Fatalf("decoded = %+v", decoded)
+			}
+		})
 	}
 }
 
@@ -254,4 +356,25 @@ func writeJSON(t *testing.T, w http.ResponseWriter, value any) {
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		t.Fatalf("Encode() error = %v", err)
 	}
+}
+
+func testJWT(t *testing.T, claims map[string]any) string {
+	t.Helper()
+
+	header, err := json.Marshal(map[string]string{
+		"alg": "HS256",
+		"typ": "JWT",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(header) error = %v", err)
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+
+	return base64.RawURLEncoding.EncodeToString(header) +
+		"." +
+		base64.RawURLEncoding.EncodeToString(payload) +
+		".signature"
 }
