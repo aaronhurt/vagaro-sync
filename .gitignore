@@ -10,3 +10,4 @@
 debugging/
 vendor/
 vagaro-sync
+node_modules/
