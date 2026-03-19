@@ -21,14 +21,6 @@ type Event struct {
 	EndTimeUTC   time.Time `json:"end_time_utc"`
 }
 
-// Adapter reconciles events in a target calendar.
-type Adapter interface {
-	EnsureCalendar(context.Context, string) (bool, error)
-	HasEvent(context.Context, string, string) (bool, error)
-	UpsertEvent(context.Context, string, Event) (string, error)
-	DeleteEvent(context.Context, string, string) error
-}
-
 type scriptRunner interface {
 	Run(context.Context, scriptInput) ([]byte, error)
 }
@@ -49,6 +41,7 @@ type scriptResult struct {
 	OK       bool   `json:"ok"`
 	Created  bool   `json:"created,omitempty"`
 	Exists   bool   `json:"exists,omitempty"`
+	Matches  bool   `json:"matches,omitempty"`
 	EventURL string `json:"event_url,omitempty"`
 }
 
@@ -98,6 +91,20 @@ func (a *JXAAdapter) HasEvent(ctx context.Context, calendarName string, eventURL
 	}
 
 	return result.Exists, nil
+}
+
+// EventMatches reports whether the existing calendar event matches the expected event fields.
+func (a *JXAAdapter) EventMatches(ctx context.Context, calendarName string, event Event) (bool, error) {
+	result, err := a.execute(ctx, scriptInput{
+		Action:       "event_matches",
+		CalendarName: calendarName,
+		Event:        &event,
+	})
+	if err != nil {
+		return false, err
+	}
+
+	return result.Matches, nil
 }
 
 // DeleteEvent removes the event with the provided URL from the named calendar.

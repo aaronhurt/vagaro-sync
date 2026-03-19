@@ -104,6 +104,35 @@ func TestHasEventPassesExpectedInput(t *testing.T) {
 	}
 }
 
+func TestEventMatchesPassesExpectedInput(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{
+		output: []byte(`{"ok":true,"matches":true}`),
+	}
+	adapter := &JXAAdapter{runner: runner}
+
+	matches, err := adapter.EventMatches(context.Background(), "Vagaro Appointments", Event{
+		URL:          "vagaro-sync://appointment/apt-1",
+		Title:        "Haircut @ Salon One",
+		StartTimeUTC: time.Date(2026, time.March, 18, 15, 0, 0, 0, time.UTC),
+		EndTimeUTC:   time.Date(2026, time.March, 18, 16, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("EventMatches() error = %v", err)
+	}
+
+	if !matches {
+		t.Fatal("expected matches=true")
+	}
+	if runner.lastInput.Action != "event_matches" {
+		t.Fatalf("Action = %q", runner.lastInput.Action)
+	}
+	if runner.lastInput.Event == nil || runner.lastInput.Event.URL != "vagaro-sync://appointment/apt-1" {
+		t.Fatalf("Event input missing URL: %+v", runner.lastInput.Event)
+	}
+}
+
 func TestJXAScriptExpandsEventRangeBeforeApplyingFinalTimes(t *testing.T) {
 	t.Parallel()
 
@@ -118,6 +147,27 @@ func TestJXAScriptExpandsEventRangeBeforeApplyingFinalTimes(t *testing.T) {
 		"event.endDate = expandedEnd;",
 		"event.startDate = desiredStart;",
 		"event.endDate = desiredEnd;",
+	}
+
+	for _, snippet := range expectedSnippets {
+		if !strings.Contains(jxaScript, snippet) {
+			t.Fatalf("jxaScript missing snippet %q", snippet)
+		}
+	}
+}
+
+func TestJXAScriptComparesManagedEventFields(t *testing.T) {
+	t.Parallel()
+
+	expectedSnippets := []string{
+		"function eventMatches(event, payload) {",
+		"return event.summary() === payload.title &&",
+		"event.location() === (payload.location || '') &&",
+		"event.description() === (payload.notes || '') &&",
+		"event.url() === payload.url &&",
+		"event.startDate().getTime() === new Date(payload.start_time_utc).getTime() &&",
+		"event.endDate().getTime() === new Date(payload.end_time_utc).getTime();",
+		"if (input.action === 'event_matches') {",
 	}
 
 	for _, snippet := range expectedSnippets {

@@ -38,6 +38,19 @@ function applyEventFields(event, payload) {
   event.url = payload.url;
 }
 
+function eventMatches(event, payload) {
+  if (event === null) {
+    return false;
+  }
+
+  return event.summary() === payload.title &&
+    event.location() === (payload.location || '') &&
+    event.description() === (payload.notes || '') &&
+    event.url() === payload.url &&
+    event.startDate().getTime() === new Date(payload.start_time_utc).getTime() &&
+    event.endDate().getTime() === new Date(payload.end_time_utc).getTime();
+}
+
 function run() {
   var input = JSON.parse(ObjC.unwrap($.getenv('VAGARO_SYNC_INPUT')));
   var calendarApp = Application('Calendar');
@@ -70,6 +83,10 @@ function run() {
 
   if (input.action === 'has_event') {
     return JSON.stringify({ok: true, exists: findEvent(calendar, input.event_url) !== null});
+  }
+
+  if (input.action === 'event_matches') {
+    return JSON.stringify({ok: true, matches: eventMatches(findEvent(calendar, input.event.url), input.event)});
   }
 
   if (input.action === 'delete_event') {

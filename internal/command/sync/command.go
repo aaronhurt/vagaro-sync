@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/aaronhurt/vagaro-sync/internal/calendar"
 	"github.com/aaronhurt/vagaro-sync/internal/state"
@@ -17,7 +18,29 @@ import (
 
 const calendarName = "Vagaro Appointments"
 
-var fetchUpcomingAppointments = func(
+type authStore interface {
+	Load(context.Context) (storage.AuthBundle, error)
+}
+
+type appointmentFetcher interface {
+	FetchUpcomingAppointments(context.Context, storage.AuthBundle, int) ([]vagaro.Appointment, error)
+}
+
+type calendarAdapter interface {
+	EnsureCalendar(context.Context, string) (bool, error)
+	HasEvent(context.Context, string, string) (bool, error)
+	EventMatches(context.Context, string, calendar.Event) (bool, error)
+	UpsertEvent(context.Context, string, calendar.Event) (string, error)
+	DeleteEvent(context.Context, string, string) error
+}
+
+type calendarFactory interface {
+	New() calendarAdapter
+}
+
+type vagaroFetcher struct{}
+
+func (vagaroFetcher) FetchUpcomingAppointments(
 	ctx context.Context,
 	bundle storage.AuthBundle,
 	pageSize int,
@@ -30,18 +53,44 @@ var fetchUpcomingAppointments = func(
 	return client.FetchUpcomingAppointments(ctx, pageSize)
 }
 
-var newCalendarAdapter = func() calendar.Adapter {
+type jxaCalendarFactory struct{}
+
+func (jxaCalendarFactory) New() calendarAdapter {
 	return calendar.NewJXAAdapter()
 }
 
 // Command runs the sync flow.
 type Command struct {
-	AuthStore  storage.AuthStore
-	StateStore *state.FileStore
+	authStore          authStore
+	stateStore         *state.FileStore
+	appointmentFetcher appointmentFetcher
+	calendarFactory    calendarFactory
+	now                func() time.Time
+}
+
+// NewCommand constructs the sync command.
+func NewCommand(store *storage.KeychainStore, stateStore *state.FileStore) *Command {
+	return &Command{
+		authStore:          store,
+		stateStore:         stateStore,
+		appointmentFetcher: vagaroFetcher{},
+		calendarFactory:    jxaCalendarFactory{},
+		now:                time.Now,
+	}
 }
 
 // Run executes the sync command.
 func (c *Command) Run(ctx context.Context, args []string) error {
+	if c.appointmentFetcher == nil {
+		c.appointmentFetcher = vagaroFetcher{}
+	}
+	if c.calendarFactory == nil {
+		c.calendarFactory = jxaCalendarFactory{}
+	}
+	if c.now == nil {
+		c.now = time.Now
+	}
+
 	cmd := flag.NewFlagSet("sync", flag.ContinueOnError)
 	cmd.SetOutput(os.Stderr)
 
@@ -54,22 +103,25 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	bundle, err := c.AuthStore.Load(ctx)
+	bundle, err := c.authStore.Load(ctx)
 	if err != nil {
 		return fmt.Errorf("load authentication bundle: %w", err)
 	}
+	if err := vagaro.ValidateAuthBundle(bundle, c.now().UTC()); err != nil {
+		return wrapAuthenticationError(err)
+	}
 
-	appointments, err := fetchUpcomingAppointments(ctx, bundle, *pageSize)
+	appointments, err := c.appointmentFetcher.FetchUpcomingAppointments(ctx, bundle, *pageSize)
+	if err != nil {
+		return wrapAuthenticationError(err)
+	}
+
+	currentState, err := c.stateStore.Load()
 	if err != nil {
 		return err
 	}
 
-	currentState, err := c.StateStore.Load()
-	if err != nil {
-		return err
-	}
-
-	adapter := newCalendarAdapter()
+	adapter := c.calendarFactory.New()
 
 	calendarCreated, err := adapter.EnsureCalendar(ctx, calendarName)
 	if err != nil {
@@ -85,6 +137,10 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 	}
 
 	plan := syncer.BuildPlan(appointments, currentState)
+	plan, err = reclassifyDriftedEvents(ctx, adapter, plan)
+	if err != nil {
+		return err
+	}
 
 	for _, event := range plan.Creates {
 		if _, err := adapter.UpsertEvent(ctx, calendarName, event); err != nil {
@@ -104,24 +160,33 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 		}
 	}
 
-	if err := c.StateStore.Save(plan.NextState); err != nil {
+	if err := c.stateStore.Save(plan.NextState); err != nil {
 		return err
 	}
 
 	_, err = fmt.Fprintf(
 		os.Stdout,
-		"synced %d appointments: %d created, %d synced, %d deleted\n",
+		"synced %d appointments: %d created, %d updated, %d unchanged, %d deleted\n",
 		len(appointments),
 		len(plan.Creates),
 		len(plan.Updates),
+		len(plan.Unchanged),
 		len(plan.Deletes),
 	)
 	return err
 }
 
+func wrapAuthenticationError(err error) error {
+	if !vagaro.IsAuthenticationInvalid(err) {
+		return err
+	}
+
+	return fmt.Errorf("authentication invalid: %w; run `vagaro-sync auth-login`", err)
+}
+
 func pruneMissingEvents(
 	ctx context.Context,
-	adapter calendar.Adapter,
+	adapter calendarAdapter,
 	currentState state.SyncState,
 ) (state.SyncState, error) {
 	if len(currentState.Appointments) == 0 {
@@ -149,4 +214,27 @@ func pruneMissingEvents(
 	}
 
 	return pruned, nil
+}
+
+func reclassifyDriftedEvents(ctx context.Context, adapter calendarAdapter, plan syncer.Plan) (syncer.Plan, error) {
+	if len(plan.Unchanged) == 0 {
+		return plan, nil
+	}
+
+	stable := make([]calendar.Event, 0, len(plan.Unchanged))
+	for _, event := range plan.Unchanged {
+		matches, err := adapter.EventMatches(ctx, calendarName, event)
+		if err != nil {
+			return syncer.Plan{}, err
+		}
+		if matches {
+			stable = append(stable, event)
+			continue
+		}
+
+		plan.Updates = append(plan.Updates, event)
+	}
+
+	plan.Unchanged = stable
+	return plan, nil
 }

@@ -20,6 +20,7 @@ type DeleteOperation struct {
 type Plan struct {
 	Creates   []calendar.Event
 	Updates   []calendar.Event
+	Unchanged []calendar.Event
 	Deletes   []DeleteOperation
 	NextState state.SyncState
 }
@@ -38,6 +39,7 @@ func BuildPlan(appointments []vagaro.Appointment, current state.SyncState) Plan 
 	plan := Plan{
 		Creates:   make([]calendar.Event, 0),
 		Updates:   make([]calendar.Event, 0),
+		Unchanged: make([]calendar.Event, 0),
 		Deletes:   make([]DeleteOperation, 0),
 		NextState: nextState,
 	}
@@ -52,8 +54,14 @@ func BuildPlan(appointments []vagaro.Appointment, current state.SyncState) Plan 
 		}
 		seen[appointment.AppointmentID] = struct{}{}
 
-		if _, ok := current.Appointments[appointment.AppointmentID]; !ok {
+		previous, ok := current.Appointments[appointment.AppointmentID]
+		if !ok {
 			plan.Creates = append(plan.Creates, event)
+			continue
+		}
+
+		if previous.SourceHash == appointment.SourceHash {
+			plan.Unchanged = append(plan.Unchanged, event)
 			continue
 		}
 
