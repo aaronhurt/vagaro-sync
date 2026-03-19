@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/aaronhurt/vagaro-sync/internal/platform"
@@ -46,7 +47,7 @@ func (s *FileStore) Load() (SyncState, error) {
 
 	var state SyncState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return SyncState{}, fmt.Errorf("decode sync state %q: %w", s.path, err)
+		return SyncState{Appointments: map[string]AppointmentState{}}, nil
 	}
 
 	if state.Appointments == nil {
@@ -72,8 +73,29 @@ func (s *FileStore) Save(state SyncState) error {
 	}
 
 	data = append(data, '\n')
-	if err := os.WriteFile(s.path, data, 0o600); err != nil {
-		return fmt.Errorf("write sync state %q: %w", s.path, err)
+	tempFile, err := os.CreateTemp(filepath.Dir(s.path), ".state-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary sync state for %q: %w", s.path, err)
+	}
+	tempPath := tempFile.Name()
+	defer func() {
+		_ = os.Remove(tempPath)
+	}()
+
+	if _, err := tempFile.Write(data); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("write temporary sync state for %q: %w", s.path, err)
+	}
+	if err := tempFile.Sync(); err != nil {
+		_ = tempFile.Close()
+		return fmt.Errorf("sync temporary state file for %q: %w", s.path, err)
+	}
+	if err := tempFile.Close(); err != nil {
+		return fmt.Errorf("close temporary state file for %q: %w", s.path, err)
+	}
+
+	if err := os.Rename(tempPath, s.path); err != nil {
+		return fmt.Errorf("replace sync state %q: %w", s.path, err)
 	}
 
 	return nil
