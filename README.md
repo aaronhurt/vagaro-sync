@@ -1,7 +1,6 @@
 # vagaro-sync
 
-`vagaro-sync` is a small macOS CLI that signs into Vagaro with a real browser,
-fetches upcoming appointments, and syncs them into Calendar.app.
+`vagaro-sync` is a small macOS CLI that signs into Vagaro with a real browser, fetches upcoming appointments, and syncs them into Calendar.app.
 
 ## Requirements
 
@@ -30,6 +29,8 @@ Authenticate once:
 ./vagaro-sync auth-login
 ```
 
+`auth-login` stores authentication only when the browser capture yields a well-formed, non-expired JWT.
+
 Sync appointments into the `Vagaro Appointments` calendar:
 
 ```bash
@@ -51,4 +52,10 @@ Print version information:
 ## Notes
 
 - `sync` creates the `Vagaro Appointments` calendar if it does not exist.
-- Re-running `sync` is incremental and will recreate missing calendar events.
+- Re-running `sync` is incremental: unchanged appointments are skipped, changed appointments are updated, and missing calendar events are recreated.
+- If the stored token is missing, malformed, or expired, re-run `./vagaro-sync auth-login`.
+- Local-only integration tests are build-tagged and are not intended for CI:
+
+```bash
+go test -tags=integration ./...
+```

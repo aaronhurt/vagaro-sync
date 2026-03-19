@@ -1,0 +1,22 @@
+{
+  "status": 200,
+  "responseCode": 1000,
+  "message": "Success",
+  "data": [
+    {
+      "appointmentId": "apt-1",
+      "businessId": "biz-1",
+      "businessName": "Salon One",
+      "telephone": "555-0100",
+      "serviceTitle": "Haircut",
+      "serviceProviderFirstName": "Taylor",
+      "serviceProviderLastName": "Smith",
+      "appStatusTitle": "Accepted",
+      "startTimeUTC": "2026-03-18T15:00:00",
+      "endTimeUTC": "2026-03-18T16:00:00",
+      "eventType": 1,
+      "sGroup": "",
+      "totalPage": 1
+    }
+  ]
+}

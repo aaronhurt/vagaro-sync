@@ -2,6 +2,9 @@ package synccommand
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -22,18 +25,26 @@ func (s fakeAuthStore) Load(context.Context) (storage.AuthBundle, error) {
 	return s.bundle, nil
 }
 
-func (s fakeAuthStore) Save(context.Context, storage.AuthBundle) error {
-	return nil
+type fakeAppointmentFetcher struct {
+	pageSize int
+	result   []vagaro.Appointment
+	err      error
 }
 
-func (s fakeAuthStore) Delete(context.Context) error {
-	return nil
+func (f *fakeAppointmentFetcher) FetchUpcomingAppointments(
+	_ context.Context,
+	_ storage.AuthBundle,
+	pageSize int,
+) ([]vagaro.Appointment, error) {
+	f.pageSize = pageSize
+	return f.result, f.err
 }
 
 type fakeCalendarAdapter struct {
 	calendarName    string
 	calendarCreated bool
 	existingEvents  map[string]bool
+	matchingEvents  map[string]bool
 	upserts         []string
 	deletes         []string
 }
@@ -47,6 +58,19 @@ func (a *fakeCalendarAdapter) HasEvent(_ context.Context, _ string, eventURL str
 	return a.existingEvents[eventURL], nil
 }
 
+func (a *fakeCalendarAdapter) EventMatches(_ context.Context, _ string, event calendar.Event) (bool, error) {
+	if a.matchingEvents == nil {
+		return true, nil
+	}
+
+	matches, ok := a.matchingEvents[event.URL]
+	if !ok {
+		return true, nil
+	}
+
+	return matches, nil
+}
+
 func (a *fakeCalendarAdapter) UpsertEvent(_ context.Context, _ string, event calendar.Event) (string, error) {
 	a.upserts = append(a.upserts, event.URL)
 	return event.URL, nil
@@ -55,6 +79,14 @@ func (a *fakeCalendarAdapter) UpsertEvent(_ context.Context, _ string, event cal
 func (a *fakeCalendarAdapter) DeleteEvent(_ context.Context, _ string, eventURL string) error {
 	a.deletes = append(a.deletes, eventURL)
 	return nil
+}
+
+type fakeCalendarFactory struct {
+	adapter calendarAdapter
+}
+
+func (f fakeCalendarFactory) New() calendarAdapter {
+	return f.adapter
 }
 
 func captureStdout(t *testing.T, fn func()) string {
@@ -89,6 +121,7 @@ func captureStdout(t *testing.T, fn func()) string {
 }
 
 func TestCommandRunSynchronizesAppointments(t *testing.T) {
+	now := time.Date(2026, time.March, 18, 12, 0, 0, 0, time.UTC)
 	appointments := []vagaro.Appointment{
 		{
 			AppointmentID: "apt-1",
@@ -130,29 +163,13 @@ func TestCommandRunSynchronizesAppointments(t *testing.T) {
 		t.Fatalf("stateStore.Save() error = %v", err)
 	}
 
-	var gotPageSize int
-	origFetchUpcomingAppointments := fetchUpcomingAppointments
-	origNewCalendarAdapter := newCalendarAdapter
-	t.Cleanup(func() {
-		fetchUpcomingAppointments = origFetchUpcomingAppointments
-		newCalendarAdapter = origNewCalendarAdapter
-	})
-
-	fetchUpcomingAppointments = func(
-		_ context.Context,
-		_ storage.AuthBundle,
-		pageSize int,
-	) ([]vagaro.Appointment, error) {
-		gotPageSize = pageSize
-		return appointments, nil
-	}
-	newCalendarAdapter = func() calendar.Adapter {
-		return adapter
-	}
-
+	fetcher := &fakeAppointmentFetcher{result: appointments}
 	cmd := &Command{
-		AuthStore:  fakeAuthStore{bundle: storage.AuthBundle{SUToken: "token"}},
-		StateStore: stateStore,
+		authStore:          fakeAuthStore{bundle: storage.AuthBundle{SUToken: testJWT(t, now.Add(5*time.Minute))}},
+		stateStore:         stateStore,
+		appointmentFetcher: fetcher,
+		calendarFactory:    fakeCalendarFactory{adapter: adapter},
+		now:                func() time.Time { return now },
 	}
 
 	output := captureStdout(t, func() {
@@ -161,8 +178,8 @@ func TestCommandRunSynchronizesAppointments(t *testing.T) {
 		}
 	})
 
-	if gotPageSize != 10 {
-		t.Fatalf("pageSize = %d, want 10", gotPageSize)
+	if fetcher.pageSize != 10 {
+		t.Fatalf("pageSize = %d, want 10", fetcher.pageSize)
 	}
 	if adapter.calendarName != "Vagaro Appointments" {
 		t.Fatalf("calendarName = %q", adapter.calendarName)
@@ -180,12 +197,13 @@ func TestCommandRunSynchronizesAppointments(t *testing.T) {
 	if len(savedState.Appointments) != 2 {
 		t.Fatalf("saved appointments = %d, want 2", len(savedState.Appointments))
 	}
-	if output != "synced 2 appointments: 1 created, 1 synced, 1 deleted\n" {
+	if output != "synced 2 appointments: 1 created, 1 updated, 0 unchanged, 1 deleted\n" {
 		t.Fatalf("output = %q", output)
 	}
 }
 
 func TestCommandRunRecreatesAppointmentsWhenCalendarWasDeleted(t *testing.T) {
+	now := time.Date(2026, time.March, 18, 12, 0, 0, 0, time.UTC)
 	appointments := []vagaro.Appointment{
 		{
 			AppointmentID: "apt-1",
@@ -211,27 +229,12 @@ func TestCommandRunRecreatesAppointmentsWhenCalendarWasDeleted(t *testing.T) {
 		t.Fatalf("stateStore.Save() error = %v", err)
 	}
 
-	origFetchUpcomingAppointments := fetchUpcomingAppointments
-	origNewCalendarAdapter := newCalendarAdapter
-	t.Cleanup(func() {
-		fetchUpcomingAppointments = origFetchUpcomingAppointments
-		newCalendarAdapter = origNewCalendarAdapter
-	})
-
-	fetchUpcomingAppointments = func(
-		_ context.Context,
-		_ storage.AuthBundle,
-		_ int,
-	) ([]vagaro.Appointment, error) {
-		return appointments, nil
-	}
-	newCalendarAdapter = func() calendar.Adapter {
-		return adapter
-	}
-
 	cmd := &Command{
-		AuthStore:  fakeAuthStore{bundle: storage.AuthBundle{SUToken: "token"}},
-		StateStore: stateStore,
+		authStore:          fakeAuthStore{bundle: storage.AuthBundle{SUToken: testJWT(t, now.Add(5*time.Minute))}},
+		stateStore:         stateStore,
+		appointmentFetcher: &fakeAppointmentFetcher{result: appointments},
+		calendarFactory:    fakeCalendarFactory{adapter: adapter},
+		now:                func() time.Time { return now },
 	}
 
 	output := captureStdout(t, func() {
@@ -246,12 +249,13 @@ func TestCommandRunRecreatesAppointmentsWhenCalendarWasDeleted(t *testing.T) {
 	if len(adapter.deletes) != 0 {
 		t.Fatalf("deletes = %v, want none", adapter.deletes)
 	}
-	if strings.TrimSpace(output) != "synced 1 appointments: 1 created, 0 synced, 0 deleted" {
+	if strings.TrimSpace(output) != "synced 1 appointments: 1 created, 0 updated, 0 unchanged, 0 deleted" {
 		t.Fatalf("output = %q", output)
 	}
 }
 
 func TestCommandRunRecreatesAppointmentWhenEventWasDeleted(t *testing.T) {
+	now := time.Date(2026, time.March, 18, 12, 0, 0, 0, time.UTC)
 	appointments := []vagaro.Appointment{
 		{
 			AppointmentID: "apt-1",
@@ -281,27 +285,12 @@ func TestCommandRunRecreatesAppointmentWhenEventWasDeleted(t *testing.T) {
 		t.Fatalf("stateStore.Save() error = %v", err)
 	}
 
-	origFetchUpcomingAppointments := fetchUpcomingAppointments
-	origNewCalendarAdapter := newCalendarAdapter
-	t.Cleanup(func() {
-		fetchUpcomingAppointments = origFetchUpcomingAppointments
-		newCalendarAdapter = origNewCalendarAdapter
-	})
-
-	fetchUpcomingAppointments = func(
-		_ context.Context,
-		_ storage.AuthBundle,
-		_ int,
-	) ([]vagaro.Appointment, error) {
-		return appointments, nil
-	}
-	newCalendarAdapter = func() calendar.Adapter {
-		return adapter
-	}
-
 	cmd := &Command{
-		AuthStore:  fakeAuthStore{bundle: storage.AuthBundle{SUToken: "token"}},
-		StateStore: stateStore,
+		authStore:          fakeAuthStore{bundle: storage.AuthBundle{SUToken: testJWT(t, now.Add(5*time.Minute))}},
+		stateStore:         stateStore,
+		appointmentFetcher: &fakeAppointmentFetcher{result: appointments},
+		calendarFactory:    fakeCalendarFactory{adapter: adapter},
+		now:                func() time.Time { return now },
 	}
 
 	if err := cmd.Run(context.Background(), nil); err != nil {
@@ -313,7 +302,8 @@ func TestCommandRunRecreatesAppointmentWhenEventWasDeleted(t *testing.T) {
 	}
 }
 
-func TestCommandRunReappliesExistingAppointmentWhenSourceIsUnchanged(t *testing.T) {
+func TestCommandRunSkipsUpsertWhenSourceIsUnchanged(t *testing.T) {
+	now := time.Date(2026, time.March, 18, 12, 0, 0, 0, time.UTC)
 	appointments := []vagaro.Appointment{
 		{
 			AppointmentID: "apt-1",
@@ -343,37 +333,153 @@ func TestCommandRunReappliesExistingAppointmentWhenSourceIsUnchanged(t *testing.
 		t.Fatalf("stateStore.Save() error = %v", err)
 	}
 
-	origFetchUpcomingAppointments := fetchUpcomingAppointments
-	origNewCalendarAdapter := newCalendarAdapter
-	t.Cleanup(func() {
-		fetchUpcomingAppointments = origFetchUpcomingAppointments
-		newCalendarAdapter = origNewCalendarAdapter
+	cmd := &Command{
+		authStore:          fakeAuthStore{bundle: storage.AuthBundle{SUToken: testJWT(t, now.Add(5*time.Minute))}},
+		stateStore:         stateStore,
+		appointmentFetcher: &fakeAppointmentFetcher{result: appointments},
+		calendarFactory:    fakeCalendarFactory{adapter: adapter},
+		now:                func() time.Time { return now },
+	}
+
+	output := captureStdout(t, func() {
+		if err := cmd.Run(context.Background(), nil); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
 	})
 
-	fetchUpcomingAppointments = func(
-		_ context.Context,
-		_ storage.AuthBundle,
-		_ int,
-	) ([]vagaro.Appointment, error) {
-		return appointments, nil
-	}
-	newCalendarAdapter = func() calendar.Adapter {
-		return adapter
-	}
-
-	cmd := &Command{
-		AuthStore:  fakeAuthStore{bundle: storage.AuthBundle{SUToken: "token"}},
-		StateStore: stateStore,
-	}
-
-	if err := cmd.Run(context.Background(), nil); err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if len(adapter.upserts) != 1 || adapter.upserts[0] != "vagaro-sync://appointment/apt-1" {
-		t.Fatalf("upserts = %v", adapter.upserts)
+	if len(adapter.upserts) != 0 {
+		t.Fatalf("upserts = %v, want none", adapter.upserts)
 	}
 	if len(adapter.deletes) != 0 {
 		t.Fatalf("deletes = %v, want none", adapter.deletes)
 	}
+	if strings.TrimSpace(output) != "synced 1 appointments: 0 created, 0 updated, 1 unchanged, 0 deleted" {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestCommandRunUpdatesDriftedAppointmentWhenCalendarEventChanged(t *testing.T) {
+	now := time.Date(2026, time.March, 18, 12, 0, 0, 0, time.UTC)
+	appointments := []vagaro.Appointment{
+		{
+			AppointmentID: "apt-1",
+			SourceHash:    "hash-1",
+			Title:         "Haircut",
+			StartTimeUTC:  time.Date(2026, time.March, 18, 15, 0, 0, 0, time.UTC),
+			EndTimeUTC:    time.Date(2026, time.March, 18, 16, 0, 0, 0, time.UTC),
+		},
+	}
+
+	currentState := state.SyncState{
+		Appointments: map[string]state.AppointmentState{
+			"apt-1": {
+				EventID:    "vagaro-sync://appointment/apt-1",
+				SourceHash: "hash-1",
+			},
+		},
+	}
+
+	adapter := &fakeCalendarAdapter{
+		existingEvents: map[string]bool{
+			"vagaro-sync://appointment/apt-1": true,
+		},
+		matchingEvents: map[string]bool{
+			"vagaro-sync://appointment/apt-1": false,
+		},
+	}
+	stateStore := state.NewFileStore(t.TempDir() + "/state.json")
+	if err := stateStore.Save(currentState); err != nil {
+		t.Fatalf("stateStore.Save() error = %v", err)
+	}
+
+	cmd := &Command{
+		authStore:          fakeAuthStore{bundle: storage.AuthBundle{SUToken: testJWT(t, now.Add(5*time.Minute))}},
+		stateStore:         stateStore,
+		appointmentFetcher: &fakeAppointmentFetcher{result: appointments},
+		calendarFactory:    fakeCalendarFactory{adapter: adapter},
+		now:                func() time.Time { return now },
+	}
+
+	output := captureStdout(t, func() {
+		if err := cmd.Run(context.Background(), nil); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	})
+
+	if len(adapter.upserts) != 1 || adapter.upserts[0] != "vagaro-sync://appointment/apt-1" {
+		t.Fatalf("upserts = %v", adapter.upserts)
+	}
+	if strings.TrimSpace(output) != "synced 1 appointments: 0 created, 1 updated, 0 unchanged, 0 deleted" {
+		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestCommandRunReturnsReauthGuidanceForExpiredToken(t *testing.T) {
+	t.Parallel()
+
+	cmd := &Command{
+		authStore: fakeAuthStore{
+			bundle: storage.AuthBundle{SUToken: testJWT(t, time.Date(2026, time.March, 18, 11, 0, 0, 0, time.UTC))},
+		},
+		stateStore:         state.NewFileStore(t.TempDir() + "/state.json"),
+		appointmentFetcher: &fakeAppointmentFetcher{},
+		calendarFactory:    fakeCalendarFactory{adapter: &fakeCalendarAdapter{}},
+		now:                func() time.Time { return time.Date(2026, time.March, 18, 12, 0, 0, 0, time.UTC) },
+	}
+
+	err := cmd.Run(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected authentication error")
+	}
+	if !strings.Contains(err.Error(), "auth-login") {
+		t.Fatalf("error = %v, want reauth guidance", err)
+	}
+}
+
+func TestCommandRunReturnsReauthGuidanceForServerAuthFailure(t *testing.T) {
+	now := time.Date(2026, time.March, 18, 12, 0, 0, 0, time.UTC)
+	cmd := &Command{
+		authStore: fakeAuthStore{
+			bundle: storage.AuthBundle{SUToken: testJWT(t, now.Add(5*time.Minute))},
+		},
+		stateStore:         state.NewFileStore(t.TempDir() + "/state.json"),
+		appointmentFetcher: &fakeAppointmentFetcher{err: fmtAuthError()},
+		calendarFactory:    fakeCalendarFactory{adapter: &fakeCalendarAdapter{}},
+		now:                func() time.Time { return now },
+	}
+
+	err := cmd.Run(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected authentication error")
+	}
+	if !strings.Contains(err.Error(), "auth-login") {
+		t.Fatalf("error = %v, want reauth guidance", err)
+	}
+}
+
+func fmtAuthError() error {
+	return fmt.Errorf("fetch appointments: %w", vagaro.ErrAuthenticationInvalid)
+}
+
+func testJWT(t *testing.T, exp time.Time) string {
+	t.Helper()
+
+	header, err := json.Marshal(map[string]string{
+		"alg": "HS256",
+		"typ": "JWT",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(header) error = %v", err)
+	}
+	payload, err := json.Marshal(map[string]int64{
+		"exp": exp.UTC().Unix(),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(payload) error = %v", err)
+	}
+
+	return base64.RawURLEncoding.EncodeToString(header) +
+		"." +
+		base64.RawURLEncoding.EncodeToString(payload) +
+		".signature"
 }

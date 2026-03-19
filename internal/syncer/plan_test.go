@@ -51,6 +51,9 @@ func TestBuildPlanProducesCreateUpdateDeleteSets(t *testing.T) {
 	if len(plan.Updates) != 1 {
 		t.Fatalf("len(Updates) = %d, want 1", len(plan.Updates))
 	}
+	if len(plan.Unchanged) != 0 {
+		t.Fatalf("len(Unchanged) = %d, want 0", len(plan.Unchanged))
+	}
 	if len(plan.Deletes) != 1 {
 		t.Fatalf("len(Deletes) = %d, want 1", len(plan.Deletes))
 	}
@@ -65,7 +68,7 @@ func TestBuildPlanProducesCreateUpdateDeleteSets(t *testing.T) {
 	}
 }
 
-func TestBuildPlanUpdatesExistingAppointmentWhenSourceIsUnchanged(t *testing.T) {
+func TestBuildPlanSkipsExistingAppointmentWhenSourceIsUnchanged(t *testing.T) {
 	t.Parallel()
 
 	appointments := []vagaro.Appointment{
@@ -92,11 +95,11 @@ func TestBuildPlanUpdatesExistingAppointmentWhenSourceIsUnchanged(t *testing.T) 
 	if len(plan.Creates) != 0 {
 		t.Fatalf("len(Creates) = %d, want 0", len(plan.Creates))
 	}
-	if len(plan.Updates) != 1 {
-		t.Fatalf("len(Updates) = %d, want 1", len(plan.Updates))
+	if len(plan.Updates) != 0 {
+		t.Fatalf("len(Updates) = %d, want 0", len(plan.Updates))
 	}
-	if plan.Updates[0].URL != "vagaro-sync://appointment/apt-1" {
-		t.Fatalf("Updates[0].URL = %q", plan.Updates[0].URL)
+	if len(plan.Unchanged) != 1 {
+		t.Fatalf("len(Unchanged) = %d, want 1", len(plan.Unchanged))
 	}
 	if len(plan.Deletes) != 0 {
 		t.Fatalf("len(Deletes) = %d, want 0", len(plan.Deletes))
