@@ -24,6 +24,11 @@ type SyncState struct {
 	Appointments map[string]AppointmentState `json:"appointments"`
 }
 
+// LoadStatus reports non-fatal conditions encountered while reading state.
+type LoadStatus struct {
+	Corrupted bool
+}
+
 // FileStore reads and writes sync state as JSON on disk.
 type FileStore struct {
 	path string
@@ -35,26 +40,26 @@ func NewFileStore(path string) *FileStore {
 }
 
 // Load returns the current sync state, treating a missing file as empty state.
-func (s *FileStore) Load() (SyncState, error) {
+func (s *FileStore) Load() (SyncState, LoadStatus, error) {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return SyncState{Appointments: map[string]AppointmentState{}}, nil
+			return SyncState{Appointments: map[string]AppointmentState{}}, LoadStatus{}, nil
 		}
 
-		return SyncState{}, fmt.Errorf("read sync state %q: %w", s.path, err)
+		return SyncState{}, LoadStatus{}, fmt.Errorf("read sync state %q: %w", s.path, err)
 	}
 
 	var state SyncState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return SyncState{Appointments: map[string]AppointmentState{}}, nil
+		return SyncState{Appointments: map[string]AppointmentState{}}, LoadStatus{Corrupted: true}, nil
 	}
 
 	if state.Appointments == nil {
 		state.Appointments = map[string]AppointmentState{}
 	}
 
-	return state, nil
+	return state, LoadStatus{}, nil
 }
 
 // Save writes the provided sync state to disk.

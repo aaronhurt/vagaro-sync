@@ -12,9 +12,12 @@ func TestLoadReturnsEmptyStateForMissingFile(t *testing.T) {
 	t.Parallel()
 
 	store := NewFileStore(filepath.Join(t.TempDir(), "state.json"))
-	got, err := store.Load()
+	got, status, err := store.Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
+	}
+	if status.Corrupted {
+		t.Fatal("expected missing file not to be marked corrupted")
 	}
 
 	if len(got.Appointments) != 0 {
@@ -41,9 +44,12 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 		t.Fatalf("Save() error = %v", err)
 	}
 
-	got, err := store.Load()
+	got, status, err := store.Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
+	}
+	if status.Corrupted {
+		t.Fatal("expected round-trip state not to be marked corrupted")
 	}
 
 	if got.Appointments["apt-1"] != want.Appointments["apt-1"] {
@@ -60,9 +66,12 @@ func TestLoadSelfHealsMalformedState(t *testing.T) {
 	}
 
 	store := NewFileStore(statePath)
-	got, err := store.Load()
+	got, status, err := store.Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
+	}
+	if !status.Corrupted {
+		t.Fatal("expected malformed state to be marked corrupted")
 	}
 
 	if len(got.Appointments) != 0 {

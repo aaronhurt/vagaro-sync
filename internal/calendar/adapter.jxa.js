@@ -81,12 +81,13 @@ function run() {
     return JSON.stringify({ok: true, event_url: input.event.url});
   }
 
-  if (input.action === 'has_event') {
-    return JSON.stringify({ok: true, exists: findEvent(calendar, input.event_url) !== null});
-  }
-
-  if (input.action === 'event_matches') {
-    return JSON.stringify({ok: true, matches: eventMatches(findEvent(calendar, input.event.url), input.event)});
+  if (input.action === 'inspect_event') {
+    var inspected = findEvent(calendar, input.event.url);
+    return JSON.stringify({
+      ok: true,
+      exists: inspected !== null,
+      matches: eventMatches(inspected, input.event)
+    });
   }
 
   if (input.action === 'delete_event') {

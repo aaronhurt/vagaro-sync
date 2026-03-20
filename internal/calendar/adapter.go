@@ -45,6 +45,12 @@ type scriptResult struct {
 	EventURL string `json:"event_url,omitempty"`
 }
 
+// EventStatus reports whether a managed event exists and still matches the expected fields.
+type EventStatus struct {
+	Exists  bool
+	Matches bool
+}
+
 // NewJXAAdapter returns a Calendar.app adapter backed by JXA.
 func NewJXAAdapter() *JXAAdapter {
 	return &JXAAdapter{
@@ -79,32 +85,21 @@ func (a *JXAAdapter) UpsertEvent(ctx context.Context, calendarName string, event
 	return result.EventURL, nil
 }
 
-// HasEvent reports whether the event with the provided URL exists in the named calendar.
-func (a *JXAAdapter) HasEvent(ctx context.Context, calendarName string, eventURL string) (bool, error) {
+// InspectEvent reports whether the managed event exists and still matches the expected fields.
+func (a *JXAAdapter) InspectEvent(ctx context.Context, calendarName string, event Event) (EventStatus, error) {
 	result, err := a.execute(ctx, scriptInput{
-		Action:       "has_event",
-		CalendarName: calendarName,
-		EventURL:     eventURL,
-	})
-	if err != nil {
-		return false, err
-	}
-
-	return result.Exists, nil
-}
-
-// EventMatches reports whether the existing calendar event matches the expected event fields.
-func (a *JXAAdapter) EventMatches(ctx context.Context, calendarName string, event Event) (bool, error) {
-	result, err := a.execute(ctx, scriptInput{
-		Action:       "event_matches",
+		Action:       "inspect_event",
 		CalendarName: calendarName,
 		Event:        &event,
 	})
 	if err != nil {
-		return false, err
+		return EventStatus{}, err
 	}
 
-	return result.Matches, nil
+	return EventStatus{
+		Exists:  result.Exists,
+		Matches: result.Matches,
+	}, nil
 }
 
 // DeleteEvent removes the event with the provided URL from the named calendar.
