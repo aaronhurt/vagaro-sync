@@ -76,56 +76,31 @@ func TestEnsureCalendarAcceptsSuccessResponse(t *testing.T) {
 	}
 }
 
-func TestHasEventPassesExpectedInput(t *testing.T) {
+func TestInspectEventPassesExpectedInput(t *testing.T) {
 	t.Parallel()
 
 	runner := &fakeRunner{
-		output: []byte(`{"ok":true,"exists":true}`),
+		output: []byte(`{"ok":true,"exists":true,"matches":true}`),
 	}
 	adapter := &JXAAdapter{runner: runner}
 
-	exists, err := adapter.HasEvent(
-		context.Background(),
-		"Vagaro Appointments",
-		"vagaro-sync://appointment/apt-1",
-	)
-	if err != nil {
-		t.Fatalf("HasEvent() error = %v", err)
-	}
-
-	if !exists {
-		t.Fatal("expected exists=true")
-	}
-	if runner.lastInput.Action != "has_event" {
-		t.Fatalf("Action = %q", runner.lastInput.Action)
-	}
-	if runner.lastInput.EventURL != "vagaro-sync://appointment/apt-1" {
-		t.Fatalf("EventURL = %q", runner.lastInput.EventURL)
-	}
-}
-
-func TestEventMatchesPassesExpectedInput(t *testing.T) {
-	t.Parallel()
-
-	runner := &fakeRunner{
-		output: []byte(`{"ok":true,"matches":true}`),
-	}
-	adapter := &JXAAdapter{runner: runner}
-
-	matches, err := adapter.EventMatches(context.Background(), "Vagaro Appointments", Event{
+	status, err := adapter.InspectEvent(context.Background(), "Vagaro Appointments", Event{
 		URL:          "vagaro-sync://appointment/apt-1",
 		Title:        "Haircut @ Salon One",
 		StartTimeUTC: time.Date(2026, time.March, 18, 15, 0, 0, 0, time.UTC),
 		EndTimeUTC:   time.Date(2026, time.March, 18, 16, 0, 0, 0, time.UTC),
 	})
 	if err != nil {
-		t.Fatalf("EventMatches() error = %v", err)
+		t.Fatalf("InspectEvent() error = %v", err)
 	}
 
-	if !matches {
+	if !status.Exists {
+		t.Fatal("expected exists=true")
+	}
+	if !status.Matches {
 		t.Fatal("expected matches=true")
 	}
-	if runner.lastInput.Action != "event_matches" {
+	if runner.lastInput.Action != "inspect_event" {
 		t.Fatalf("Action = %q", runner.lastInput.Action)
 	}
 	if runner.lastInput.Event == nil || runner.lastInput.Event.URL != "vagaro-sync://appointment/apt-1" {
@@ -167,7 +142,7 @@ func TestJXAScriptComparesManagedEventFields(t *testing.T) {
 		"event.url() === payload.url &&",
 		"event.startDate().getTime() === new Date(payload.start_time_utc).getTime() &&",
 		"event.endDate().getTime() === new Date(payload.end_time_utc).getTime();",
-		"if (input.action === 'event_matches') {",
+		"if (input.action === 'inspect_event') {",
 	}
 
 	for _, snippet := range expectedSnippets {

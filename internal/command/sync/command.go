@@ -28,8 +28,7 @@ type appointmentFetcher interface {
 
 type calendarAdapter interface {
 	EnsureCalendar(context.Context, string) (bool, error)
-	HasEvent(context.Context, string, string) (bool, error)
-	EventMatches(context.Context, string, calendar.Event) (bool, error)
+	InspectEvent(context.Context, string, calendar.Event) (calendar.EventStatus, error)
 	UpsertEvent(context.Context, string, calendar.Event) (string, error)
 	DeleteEvent(context.Context, string, string) error
 }
@@ -116,9 +115,17 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 		return wrapAuthenticationError(err)
 	}
 
-	currentState, err := c.stateStore.Load()
+	currentState, loadStatus, err := c.stateStore.Load()
 	if err != nil {
 		return err
+	}
+	if loadStatus.Corrupted {
+		if _, err := fmt.Fprintln(
+			os.Stderr,
+			"warning: sync state was corrupted and has been reset; sync will continue, but stale managed Calendar events may remain",
+		); err != nil {
+			return err
+		}
 	}
 
 	adapter := c.calendarFactory.New()
@@ -129,15 +136,10 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 	}
 	if calendarCreated {
 		currentState = state.SyncState{Appointments: map[string]state.AppointmentState{}}
-	} else {
-		currentState, err = pruneMissingEvents(ctx, adapter, currentState)
-		if err != nil {
-			return err
-		}
 	}
 
 	plan := syncer.BuildPlan(appointments, currentState)
-	plan, err = reclassifyDriftedEvents(ctx, adapter, plan)
+	plan, err = reclassifyRetainedEvents(ctx, adapter, plan)
 	if err != nil {
 		return err
 	}
@@ -184,50 +186,18 @@ func wrapAuthenticationError(err error) error {
 	return fmt.Errorf("authentication invalid: %w; run `vagaro-sync auth-login`", err)
 }
 
-func pruneMissingEvents(
-	ctx context.Context,
-	adapter calendarAdapter,
-	currentState state.SyncState,
-) (state.SyncState, error) {
-	if len(currentState.Appointments) == 0 {
-		return currentState, nil
-	}
-
-	pruned := state.SyncState{
-		Appointments: make(map[string]state.AppointmentState, len(currentState.Appointments)),
-	}
-
-	for appointmentID, appointmentState := range currentState.Appointments {
-		if appointmentState.EventID == "" {
-			continue
-		}
-
-		exists, err := adapter.HasEvent(ctx, calendarName, appointmentState.EventID)
-		if err != nil {
-			return state.SyncState{}, err
-		}
-		if !exists {
-			continue
-		}
-
-		pruned.Appointments[appointmentID] = appointmentState
-	}
-
-	return pruned, nil
-}
-
-func reclassifyDriftedEvents(ctx context.Context, adapter calendarAdapter, plan syncer.Plan) (syncer.Plan, error) {
+func reclassifyRetainedEvents(ctx context.Context, adapter calendarAdapter, plan syncer.Plan) (syncer.Plan, error) {
 	if len(plan.Unchanged) == 0 {
 		return plan, nil
 	}
 
 	stable := make([]calendar.Event, 0, len(plan.Unchanged))
 	for _, event := range plan.Unchanged {
-		matches, err := adapter.EventMatches(ctx, calendarName, event)
+		status, err := adapter.InspectEvent(ctx, calendarName, event)
 		if err != nil {
 			return syncer.Plan{}, err
 		}
-		if matches {
+		if status.Exists && status.Matches {
 			stable = append(stable, event)
 			continue
 		}

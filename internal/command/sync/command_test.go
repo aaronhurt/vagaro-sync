@@ -43,8 +43,7 @@ func (f *fakeAppointmentFetcher) FetchUpcomingAppointments(
 type fakeCalendarAdapter struct {
 	calendarName    string
 	calendarCreated bool
-	existingEvents  map[string]bool
-	matchingEvents  map[string]bool
+	eventStatus     map[string]calendar.EventStatus
 	upserts         []string
 	deletes         []string
 }
@@ -54,21 +53,21 @@ func (a *fakeCalendarAdapter) EnsureCalendar(_ context.Context, calendarName str
 	return a.calendarCreated, nil
 }
 
-func (a *fakeCalendarAdapter) HasEvent(_ context.Context, _ string, eventURL string) (bool, error) {
-	return a.existingEvents[eventURL], nil
-}
-
-func (a *fakeCalendarAdapter) EventMatches(_ context.Context, _ string, event calendar.Event) (bool, error) {
-	if a.matchingEvents == nil {
-		return true, nil
+func (a *fakeCalendarAdapter) InspectEvent(
+	_ context.Context,
+	_ string,
+	event calendar.Event,
+) (calendar.EventStatus, error) {
+	if a.eventStatus == nil {
+		return calendar.EventStatus{Exists: true, Matches: true}, nil
 	}
 
-	matches, ok := a.matchingEvents[event.URL]
+	status, ok := a.eventStatus[event.URL]
 	if !ok {
-		return true, nil
+		return calendar.EventStatus{Exists: true, Matches: true}, nil
 	}
 
-	return matches, nil
+	return status, nil
 }
 
 func (a *fakeCalendarAdapter) UpsertEvent(_ context.Context, _ string, event calendar.Event) (string, error) {
@@ -101,6 +100,37 @@ func captureStdout(t *testing.T, fn func()) string {
 	os.Stdout = writer
 	defer func() {
 		os.Stdout = originalStdout
+	}()
+
+	fn()
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("writer.Close() error = %v", err)
+	}
+
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("io.ReadAll() error = %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("reader.Close() error = %v", err)
+	}
+
+	return string(output)
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+
+	originalStderr := os.Stderr
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+
+	os.Stderr = writer
+	defer func() {
+		os.Stderr = originalStderr
 	}()
 
 	fn()
@@ -153,9 +183,9 @@ func TestCommandRunSynchronizesAppointments(t *testing.T) {
 	}
 
 	adapter := &fakeCalendarAdapter{
-		existingEvents: map[string]bool{
-			"vagaro-sync://appointment/apt-2": true,
-			"vagaro-sync://appointment/apt-3": true,
+		eventStatus: map[string]calendar.EventStatus{
+			"vagaro-sync://appointment/apt-2": {Exists: true, Matches: true},
+			"vagaro-sync://appointment/apt-3": {Exists: true, Matches: true},
 		},
 	}
 	stateStore := state.NewFileStore(t.TempDir() + "/state.json")
@@ -190,9 +220,12 @@ func TestCommandRunSynchronizesAppointments(t *testing.T) {
 	if len(adapter.deletes) != 1 || adapter.deletes[0] != "vagaro-sync://appointment/apt-3" {
 		t.Fatalf("deletes = %v", adapter.deletes)
 	}
-	savedState, err := stateStore.Load()
+	savedState, status, err := stateStore.Load()
 	if err != nil {
 		t.Fatalf("stateStore.Load() error = %v", err)
+	}
+	if status.Corrupted {
+		t.Fatal("expected saved state not to be marked corrupted")
 	}
 	if len(savedState.Appointments) != 2 {
 		t.Fatalf("saved appointments = %d, want 2", len(savedState.Appointments))
@@ -275,11 +308,9 @@ func TestCommandRunRecreatesAppointmentWhenEventWasDeleted(t *testing.T) {
 		},
 	}
 
-	adapter := &fakeCalendarAdapter{
-		existingEvents: map[string]bool{
-			"vagaro-sync://appointment/apt-1": false,
-		},
-	}
+	adapter := &fakeCalendarAdapter{eventStatus: map[string]calendar.EventStatus{
+		"vagaro-sync://appointment/apt-1": {Exists: false, Matches: false},
+	}}
 	stateStore := state.NewFileStore(t.TempDir() + "/state.json")
 	if err := stateStore.Save(currentState); err != nil {
 		t.Fatalf("stateStore.Save() error = %v", err)
@@ -323,11 +354,9 @@ func TestCommandRunSkipsUpsertWhenSourceIsUnchanged(t *testing.T) {
 		},
 	}
 
-	adapter := &fakeCalendarAdapter{
-		existingEvents: map[string]bool{
-			"vagaro-sync://appointment/apt-1": true,
-		},
-	}
+	adapter := &fakeCalendarAdapter{eventStatus: map[string]calendar.EventStatus{
+		"vagaro-sync://appointment/apt-1": {Exists: true, Matches: true},
+	}}
 	stateStore := state.NewFileStore(t.TempDir() + "/state.json")
 	if err := stateStore.Save(currentState); err != nil {
 		t.Fatalf("stateStore.Save() error = %v", err)
@@ -379,14 +408,9 @@ func TestCommandRunUpdatesDriftedAppointmentWhenCalendarEventChanged(t *testing.
 		},
 	}
 
-	adapter := &fakeCalendarAdapter{
-		existingEvents: map[string]bool{
-			"vagaro-sync://appointment/apt-1": true,
-		},
-		matchingEvents: map[string]bool{
-			"vagaro-sync://appointment/apt-1": false,
-		},
-	}
+	adapter := &fakeCalendarAdapter{eventStatus: map[string]calendar.EventStatus{
+		"vagaro-sync://appointment/apt-1": {Exists: true, Matches: false},
+	}}
 	stateStore := state.NewFileStore(t.TempDir() + "/state.json")
 	if err := stateStore.Save(currentState); err != nil {
 		t.Fatalf("stateStore.Save() error = %v", err)
@@ -454,6 +478,35 @@ func TestCommandRunReturnsReauthGuidanceForServerAuthFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "auth-login") {
 		t.Fatalf("error = %v, want reauth guidance", err)
+	}
+}
+
+func TestCommandRunWarnsWhenStateWasCorrupted(t *testing.T) {
+	now := time.Date(2026, time.March, 18, 12, 0, 0, 0, time.UTC)
+	statePath := t.TempDir() + "/state.json"
+	if err := os.WriteFile(statePath, []byte("{not-json"), 0o600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	cmd := &Command{
+		authStore:          fakeAuthStore{bundle: storage.AuthBundle{SUToken: testJWT(t, now.Add(5*time.Minute))}},
+		stateStore:         state.NewFileStore(statePath),
+		appointmentFetcher: &fakeAppointmentFetcher{},
+		calendarFactory:    fakeCalendarFactory{adapter: &fakeCalendarAdapter{}},
+		now:                func() time.Time { return now },
+	}
+
+	stderr := captureStderr(t, func() {
+		if err := cmd.Run(context.Background(), nil); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	})
+
+	if !strings.Contains(stderr, "warning: sync state was corrupted and has been reset") {
+		t.Fatalf("stderr = %q", stderr)
+	}
+	if !strings.Contains(stderr, "stale managed Calendar events may remain") {
+		t.Fatalf("stderr = %q", stderr)
 	}
 }
 
