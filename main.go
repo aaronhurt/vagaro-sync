@@ -9,8 +9,6 @@ import (
 	"os"
 )
 
-var buildVersion = ""
-
 func main() {
 	if err := run(context.Background(), os.Args[1:]); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "vagaro-sync: %v\n", err)
@@ -40,18 +38,21 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	name := root.Arg(0)
-	command, ok, err := newCommand(name)
+	command, err := findCommandSpec(name)
+	if err != nil {
+		if errors.Is(err, errUnknownCommand) {
+			if usageErr := writeUsage(os.Stderr); usageErr != nil {
+				return usageErr
+			}
+		}
+
+		return err
+	}
+
+	instance, err := command.New()
 	if err != nil {
 		return err
 	}
 
-	if !ok {
-		if err := writeUsage(os.Stderr); err != nil {
-			return err
-		}
-
-		return fmt.Errorf("unknown command %q", name)
-	}
-
-	return command.Run(ctx, root.Args()[1:])
+	return instance.Run(ctx, root.Args()[1:])
 }
