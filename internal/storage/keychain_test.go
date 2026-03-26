@@ -89,7 +89,10 @@ func TestKeychainStoreLoadReturnsNotFound(t *testing.T) {
 		service: "service",
 		account: "account",
 		run: func(_ context.Context, _ ...string) ([]byte, error) {
-			return nil, errors.New("security: secKeychainSearchCopyNext: the specified item could not be found in the keychain")
+			return nil, &securityCommandError{
+				err:    errors.New("security failed"),
+				output: "security: secKeychainSearchCopyNext: the specified item could not be found in the keychain",
+			}
 		},
 	}
 
@@ -106,11 +109,33 @@ func TestKeychainStoreDeleteIgnoresMissingItem(t *testing.T) {
 		service: "service",
 		account: "account",
 		run: func(_ context.Context, _ ...string) ([]byte, error) {
-			return nil, errors.New("security: secKeychainSearchCopyNext: the specified item could not be found in the keychain")
+			return nil, &securityCommandError{
+				err:    errors.New("security failed"),
+				output: "security: secKeychainSearchCopyNext: the specified item could not be found in the keychain",
+			}
 		},
 	}
 
 	if err := store.Delete(context.Background()); err != nil {
 		t.Fatalf("Delete() error = %v", err)
+	}
+}
+
+func TestKeychainStoreDeleteReturnsNonNotFoundError(t *testing.T) {
+	t.Parallel()
+
+	store := &KeychainStore{
+		service: "service",
+		account: "account",
+		run: func(_ context.Context, _ ...string) ([]byte, error) {
+			return nil, &securityCommandError{
+				err:    errors.New("security failed"),
+				output: "security: access denied",
+			}
+		},
+	}
+
+	if err := store.Delete(context.Background()); err == nil {
+		t.Fatal("expected delete error")
 	}
 }

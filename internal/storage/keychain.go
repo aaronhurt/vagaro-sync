@@ -13,6 +13,24 @@ var errAuthBundleNotFound = errors.New("auth bundle not found")
 
 type commandRunner func(context.Context, ...string) ([]byte, error)
 
+type securityCommandError struct {
+	err    error
+	output string
+}
+
+func (e *securityCommandError) Error() string {
+	output := strings.TrimSpace(e.output)
+	if output == "" {
+		return e.err.Error()
+	}
+
+	return fmt.Sprintf("%v: %s", e.err, output)
+}
+
+func (e *securityCommandError) Unwrap() error {
+	return e.err
+}
+
 // KeychainStore persists authentication bundles in the macOS keychain.
 type KeychainStore struct {
 	service string
@@ -88,12 +106,20 @@ func runSecurityCommand(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "security", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+		return nil, &securityCommandError{
+			err:    err,
+			output: string(output),
+		}
 	}
 
 	return output, nil
 }
 
 func isItemNotFound(err error) bool {
-	return strings.Contains(err.Error(), "could not be found in the keychain")
+	var commandErr *securityCommandError
+	if !errors.As(err, &commandErr) {
+		return false
+	}
+
+	return strings.Contains(commandErr.output, "could not be found in the keychain")
 }
