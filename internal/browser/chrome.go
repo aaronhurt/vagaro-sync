@@ -31,7 +31,6 @@ type ChromeOptions struct {
 type ChromeBackend struct {
 	executablePath string
 	timeout        time.Duration
-	currentBundle  func(context.Context) (storage.AuthBundle, error)
 }
 
 // NewChromeBackend constructs a Chrome-backed browser authenticator.
@@ -53,16 +52,11 @@ func NewChromeBackend(opts ChromeOptions) (*ChromeBackend, error) {
 	return &ChromeBackend{
 		executablePath: executablePath,
 		timeout:        timeout,
-		currentBundle:  currentAuthBundle,
 	}, nil
 }
 
 // Authenticate opens Chrome, waits for a Vagaro session, and returns the captured bundle.
-func (b *ChromeBackend) Authenticate(ctx context.Context, loginURL string) (storage.AuthBundle, error) {
-	if loginURL == "" {
-		loginURL = defaultLoginURL
-	}
-
+func (b *ChromeBackend) Authenticate(ctx context.Context) (storage.AuthBundle, error) {
 	authCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
 
@@ -86,7 +80,7 @@ func (b *ChromeBackend) Authenticate(ctx context.Context, loginURL string) (stor
 	browserCtx, cancelBrowser := chromedp.NewContext(allocCtx)
 	defer cancelBrowser()
 
-	if err := chromedp.Run(browserCtx, network.Enable(), chromedp.Navigate(loginURL)); err != nil {
+	if err := chromedp.Run(browserCtx, network.Enable(), chromedp.Navigate(defaultLoginURL)); err != nil {
 		return storage.AuthBundle{}, fmt.Errorf("open login page: %w", err)
 	}
 
@@ -109,7 +103,7 @@ func (b *ChromeBackend) waitForAuthenticatedSession(ctx context.Context) (storag
 	defer ticker.Stop()
 
 	for {
-		bundle, err := b.currentBundle(ctx)
+		bundle, err := currentAuthBundle(ctx)
 		if err != nil {
 			return storage.AuthBundle{}, fmt.Errorf("read authenticated session cookies: %w", err)
 		}

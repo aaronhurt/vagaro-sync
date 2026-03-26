@@ -2,20 +2,19 @@ package authlogin
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/aaronhurt/vagaro-sync/internal/browser"
 	"github.com/aaronhurt/vagaro-sync/internal/storage"
+	"github.com/aaronhurt/vagaro-sync/internal/testutil"
 )
 
 type fakeBackend struct {
 	bundle storage.AuthBundle
 }
 
-func (f fakeBackend) Authenticate(context.Context, string) (storage.AuthBundle, error) {
+func (f fakeBackend) Authenticate(context.Context) (storage.AuthBundle, error) {
 	return f.bundle, nil
 }
 
@@ -40,13 +39,12 @@ func TestCommandRunStoresAuthenticatedBundle(t *testing.T) {
 	}
 
 	backend := fakeBackend{
-		bundle: storage.AuthBundle{SUToken: testJWT(t, time.Now().Add(5*time.Minute))},
+		bundle: storage.AuthBundle{SUToken: testutil.ValidJWT(t)},
 	}
 	factory := &fakeBrowserFactory{backend: backend}
 	cmd := &Command{
 		authStore:      authStoreStub{save: storeSave},
 		browserFactory: factory,
-		now:            time.Now,
 	}
 
 	if err := cmd.Run(context.Background(), []string{"-timeout=5m"}); err != nil {
@@ -75,7 +73,6 @@ func TestCommandRunRejectsInvalidCapturedToken(t *testing.T) {
 		browserFactory: &fakeBrowserFactory{
 			backend: fakeBackend{bundle: storage.AuthBundle{SUToken: "not-a-jwt"}},
 		},
-		now: time.Now,
 	}
 
 	if err := cmd.Run(context.Background(), nil); err == nil {
@@ -100,27 +97,4 @@ func (s authStoreStub) Save(ctx context.Context, bundle storage.AuthBundle) erro
 
 func (s authStoreStub) Delete(context.Context) error {
 	return nil
-}
-
-func testJWT(t *testing.T, exp time.Time) string {
-	t.Helper()
-
-	header, err := json.Marshal(map[string]string{
-		"alg": "HS256",
-		"typ": "JWT",
-	})
-	if err != nil {
-		t.Fatalf("json.Marshal(header) error = %v", err)
-	}
-	payload, err := json.Marshal(map[string]int64{
-		"exp": exp.UTC().Unix(),
-	})
-	if err != nil {
-		t.Fatalf("json.Marshal(payload) error = %v", err)
-	}
-
-	return base64.RawURLEncoding.EncodeToString(header) +
-		"." +
-		base64.RawURLEncoding.EncodeToString(payload) +
-		".signature"
 }

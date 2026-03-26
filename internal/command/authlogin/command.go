@@ -9,7 +9,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/aaronhurt/vagaro-sync/internal/auth"
 	"github.com/aaronhurt/vagaro-sync/internal/browser"
 	"github.com/aaronhurt/vagaro-sync/internal/storage"
 	"github.com/aaronhurt/vagaro-sync/internal/vagaro"
@@ -20,7 +19,7 @@ type authStore interface {
 }
 
 type browserAuthenticator interface {
-	Authenticate(context.Context, string) (storage.AuthBundle, error)
+	Authenticate(context.Context) (storage.AuthBundle, error)
 }
 
 type browserFactory interface {
@@ -37,7 +36,6 @@ func (chromeBackendFactory) New(opts browser.ChromeOptions) (browserAuthenticato
 type Command struct {
 	authStore      authStore
 	browserFactory browserFactory
-	now            func() time.Time
 }
 
 // NewCommand constructs the auth-login command.
@@ -45,7 +43,6 @@ func NewCommand(store *storage.KeychainStore) *Command {
 	return &Command{
 		authStore:      store,
 		browserFactory: chromeBackendFactory{},
-		now:            time.Now,
 	}
 }
 
@@ -53,9 +50,6 @@ func NewCommand(store *storage.KeychainStore) *Command {
 func (c *Command) Run(ctx context.Context, args []string) error {
 	if c.browserFactory == nil {
 		c.browserFactory = chromeBackendFactory{}
-	}
-	if c.now == nil {
-		c.now = time.Now
 	}
 
 	cmd := flag.NewFlagSet("auth-login", flag.ContinueOnError)
@@ -77,11 +71,16 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	bundle, err := auth.Login(ctx, backend)
+	bundle, err := backend.Authenticate(ctx)
 	if err != nil {
 		return err
 	}
-	if err := vagaro.ValidateAuthBundle(bundle, c.now().UTC()); err != nil {
+	now := time.Now().UTC()
+	if err := vagaro.ValidateAuthBundle(bundle, now); err != nil {
+		return err
+	}
+	remaining, err := vagaro.RemainingTokenLifetime(bundle, now)
+	if err != nil {
 		return err
 	}
 
@@ -89,6 +88,10 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	_, err = fmt.Fprintln(os.Stdout, "authentication stored")
+	_, err = fmt.Fprintf(
+		os.Stdout,
+		"authentication stored\nauth expires in: %s\n",
+		vagaro.FormatTokenLifetime(remaining),
+	)
 	return err
 }
