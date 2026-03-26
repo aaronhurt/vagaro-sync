@@ -133,26 +133,47 @@ func NewClient(bundle storage.AuthBundle) (*Client, error) {
 
 // ValidateAuthBundle enforces the currently known JWT-based Vagaro auth token contract.
 func ValidateAuthBundle(bundle storage.AuthBundle, now time.Time) error {
-	token := strings.TrimSpace(bundle.SUToken)
-	if token == "" {
-		return fmt.Errorf("%w: missing s_utkn", ErrAuthenticationInvalid)
-	}
-
-	claims, err := decodeJWTClaims(token)
+	expUnix, err := authTokenExpirationUnix(bundle)
 	if err != nil {
-		return fmt.Errorf("%w: invalid JWT: %v", ErrAuthenticationInvalid, err)
+		return err
 	}
-
-	expUnix, err := claims.Exp.Int64()
-	if err != nil {
-		return fmt.Errorf("%w: missing or invalid exp claim", ErrAuthenticationInvalid)
-	}
-
 	if now.UTC().Unix() >= expUnix {
 		return fmt.Errorf("%w: token expired at %s", ErrAuthenticationInvalid, time.Unix(expUnix, 0).UTC().Format(time.RFC3339))
 	}
 
 	return nil
+}
+
+// RemainingTokenLifetime returns the whole-second lifetime remaining on a valid auth token.
+func RemainingTokenLifetime(bundle storage.AuthBundle, now time.Time) (time.Duration, error) {
+	expUnix, err := authTokenExpirationUnix(bundle)
+	if err != nil {
+		return 0, err
+	}
+	if now.UTC().Unix() >= expUnix {
+		return 0, fmt.Errorf("%w: token expired at %s", ErrAuthenticationInvalid, time.Unix(expUnix, 0).UTC().Format(time.RFC3339))
+	}
+
+	return time.Duration(expUnix-now.UTC().Unix()) * time.Second, nil
+}
+
+// FormatTokenLifetime renders a token lifetime using explicit day/hour/minute/second units.
+func FormatTokenLifetime(lifetime time.Duration) string {
+	if lifetime < 0 {
+		lifetime = 0
+	}
+
+	const day = 24 * time.Hour
+
+	days := lifetime / day
+	lifetime %= day
+	hours := lifetime / time.Hour
+	lifetime %= time.Hour
+	minutes := lifetime / time.Minute
+	lifetime %= time.Minute
+	seconds := lifetime / time.Second
+
+	return fmt.Sprintf("%dd %dh %dm %ds", days, hours, minutes, seconds)
 }
 
 // ProbeSession validates the currently stored session using the appointments endpoint contract.
@@ -342,6 +363,25 @@ func decodeJWTClaims(token string) (jwtClaims, error) {
 	}
 
 	return claims, nil
+}
+
+func authTokenExpirationUnix(bundle storage.AuthBundle) (int64, error) {
+	token := strings.TrimSpace(bundle.SUToken)
+	if token == "" {
+		return 0, fmt.Errorf("%w: missing s_utkn", ErrAuthenticationInvalid)
+	}
+
+	claims, err := decodeJWTClaims(token)
+	if err != nil {
+		return 0, fmt.Errorf("%w: invalid JWT: %v", ErrAuthenticationInvalid, err)
+	}
+
+	expUnix, err := claims.Exp.Int64()
+	if err != nil {
+		return 0, fmt.Errorf("%w: missing or invalid exp claim", ErrAuthenticationInvalid)
+	}
+
+	return expUnix, nil
 }
 
 // NormalizeAppointments converts typed Vagaro payloads into the normalized appointment model.
