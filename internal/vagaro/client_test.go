@@ -2,7 +2,6 @@ package vagaro
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aaronhurt/vagaro-sync/internal/storage"
+	"github.com/aaronhurt/vagaro-sync/internal/testutil"
 )
 
 func TestFetchUpcomingAppointmentsUsesTypedPayload(t *testing.T) {
@@ -201,9 +201,9 @@ func TestValidateAuthBundle(t *testing.T) {
 	}{
 		{name: "missing", token: "", wantAuth: true},
 		{name: "malformed", token: "not-a-jwt", wantAuth: true},
-		{name: "missing-exp", token: testJWT(t, map[string]any{"sub": "abc"}), wantAuth: true},
-		{name: "expired", token: testJWT(t, map[string]any{"exp": now.Add(-time.Minute).Unix()}), wantAuth: true},
-		{name: "valid", token: testJWT(t, map[string]any{"exp": now.Add(time.Minute).Unix()}), wantAuth: false},
+		{name: "missing-exp", token: testutil.JWT(t, map[string]any{"sub": "abc"}), wantAuth: true},
+		{name: "expired", token: testutil.JWT(t, map[string]any{"exp": now.Add(-time.Minute).Unix()}), wantAuth: true},
+		{name: "valid", token: testutil.JWT(t, map[string]any{"exp": now.Add(time.Minute).Unix()}), wantAuth: false},
 	}
 
 	for _, tc := range testCases {
@@ -356,25 +356,4 @@ func writeJSON(t *testing.T, w http.ResponseWriter, value any) {
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		t.Fatalf("Encode() error = %v", err)
 	}
-}
-
-func testJWT(t *testing.T, claims map[string]any) string {
-	t.Helper()
-
-	header, err := json.Marshal(map[string]string{
-		"alg": "HS256",
-		"typ": "JWT",
-	})
-	if err != nil {
-		t.Fatalf("json.Marshal(header) error = %v", err)
-	}
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		t.Fatalf("json.Marshal(payload) error = %v", err)
-	}
-
-	return base64.RawURLEncoding.EncodeToString(header) +
-		"." +
-		base64.RawURLEncoding.EncodeToString(payload) +
-		".signature"
 }
