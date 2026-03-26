@@ -17,6 +17,7 @@ import (
 )
 
 const calendarName = "Vagaro Appointments"
+const retainedInspectionProgressInterval = 5
 
 type authStore interface {
 	Load(context.Context) (storage.AuthBundle, error)
@@ -64,7 +65,6 @@ type Command struct {
 	stateStore         *state.FileStore
 	appointmentFetcher appointmentFetcher
 	calendarFactory    calendarFactory
-	now                func() time.Time
 }
 
 // NewCommand constructs the sync command.
@@ -74,7 +74,6 @@ func NewCommand(store *storage.KeychainStore, stateStore *state.FileStore) *Comm
 		stateStore:         stateStore,
 		appointmentFetcher: vagaroFetcher{},
 		calendarFactory:    jxaCalendarFactory{},
-		now:                time.Now,
 	}
 }
 
@@ -85,9 +84,6 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 	}
 	if c.calendarFactory == nil {
 		c.calendarFactory = jxaCalendarFactory{}
-	}
-	if c.now == nil {
-		c.now = time.Now
 	}
 
 	cmd := flag.NewFlagSet("sync", flag.ContinueOnError)
@@ -106,8 +102,19 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load authentication bundle: %w", err)
 	}
-	if err := vagaro.ValidateAuthBundle(bundle, c.now().UTC()); err != nil {
+	now := time.Now().UTC()
+	if err := vagaro.ValidateAuthBundle(bundle, now); err != nil {
 		return wrapAuthenticationError(err)
+	}
+	remaining, err := vagaro.RemainingTokenLifetime(bundle, now)
+	if err != nil {
+		return wrapAuthenticationError(err)
+	}
+	if _, err := fmt.Fprintf(os.Stdout, "auth expires in: %s\n", vagaro.FormatTokenLifetime(remaining)); err != nil {
+		return err
+	}
+	if err := writeProgress("fetching appointments from Vagaro"); err != nil {
+		return err
 	}
 
 	appointments, err := c.appointmentFetcher.FetchUpcomingAppointments(ctx, bundle, *pageSize)
@@ -129,6 +136,9 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 	}
 
 	adapter := c.calendarFactory.New()
+	if err := writeProgress("preparing calendar reconciliation"); err != nil {
+		return err
+	}
 
 	calendarCreated, err := adapter.EnsureCalendar(ctx, calendarName)
 	if err != nil {
@@ -139,9 +149,17 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 	}
 
 	plan := syncer.BuildPlan(appointments, currentState)
+	if err := writeProgress("inspecting %d retained calendar events", len(plan.Unchanged)); err != nil {
+		return err
+	}
 	plan, err = reclassifyRetainedEvents(ctx, adapter, plan)
 	if err != nil {
 		return err
+	}
+	if len(plan.Creates) > 0 || len(plan.Updates) > 0 || len(plan.Deletes) > 0 {
+		if err := writeProgress("applying calendar changes"); err != nil {
+			return err
+		}
 	}
 
 	for _, event := range plan.Creates {
@@ -162,6 +180,9 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 		}
 	}
 
+	if err := writeProgress("saving sync state"); err != nil {
+		return err
+	}
 	if err := c.stateStore.Save(plan.NextState); err != nil {
 		return err
 	}
@@ -186,25 +207,41 @@ func wrapAuthenticationError(err error) error {
 	return fmt.Errorf("authentication invalid: %w; run `vagaro-sync auth-login`", err)
 }
 
-func reclassifyRetainedEvents(ctx context.Context, adapter calendarAdapter, plan syncer.Plan) (syncer.Plan, error) {
+func reclassifyRetainedEvents(
+	ctx context.Context,
+	adapter calendarAdapter,
+	plan syncer.Plan,
+) (syncer.Plan, error) {
 	if len(plan.Unchanged) == 0 {
 		return plan, nil
 	}
 
 	stable := make([]calendar.Event, 0, len(plan.Unchanged))
-	for _, event := range plan.Unchanged {
+	total := len(plan.Unchanged)
+	for idx, event := range plan.Unchanged {
 		status, err := adapter.InspectEvent(ctx, calendarName, event)
 		if err != nil {
 			return syncer.Plan{}, err
 		}
 		if status.Exists && status.Matches {
 			stable = append(stable, event)
-			continue
+		} else {
+			plan.Updates = append(plan.Updates, event)
 		}
 
-		plan.Updates = append(plan.Updates, event)
+		inspected := idx + 1
+		if inspected%retainedInspectionProgressInterval == 0 || inspected == total {
+			if err := writeProgress("inspected %d/%d retained calendar events", inspected, total); err != nil {
+				return syncer.Plan{}, err
+			}
+		}
 	}
 
 	plan.Unchanged = stable
 	return plan, nil
+}
+
+func writeProgress(format string, args ...any) error {
+	_, err := fmt.Fprintf(os.Stderr, "progress: "+format+"\n", args...)
+	return err
 }
