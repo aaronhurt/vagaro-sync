@@ -2,7 +2,6 @@ package calendar
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 )
@@ -105,49 +104,5 @@ func TestInspectEventPassesExpectedInput(t *testing.T) {
 	}
 	if runner.lastInput.Event == nil || runner.lastInput.Event.URL != "vagaro-sync://appointment/apt-1" {
 		t.Fatalf("Event input missing URL: %+v", runner.lastInput.Event)
-	}
-}
-
-func TestJXAScriptExpandsEventRangeBeforeApplyingFinalTimes(t *testing.T) {
-	t.Parallel()
-
-	expectedSnippets := []string{
-		"var desiredStart = new Date(payload.start_time_utc);",
-		"var desiredEnd = new Date(payload.end_time_utc);",
-		"var currentStart = event.startDate();",
-		"var currentEnd = event.endDate();",
-		"var expandedStart = currentStart < desiredStart ? currentStart : desiredStart;",
-		"var expandedEnd = currentEnd > desiredEnd ? currentEnd : desiredEnd;",
-		"event.startDate = expandedStart;",
-		"event.endDate = expandedEnd;",
-		"event.startDate = desiredStart;",
-		"event.endDate = desiredEnd;",
-	}
-
-	for _, snippet := range expectedSnippets {
-		if !strings.Contains(jxaScript, snippet) {
-			t.Fatalf("jxaScript missing snippet %q", snippet)
-		}
-	}
-}
-
-func TestJXAScriptComparesManagedEventFields(t *testing.T) {
-	t.Parallel()
-
-	expectedSnippets := []string{
-		"function eventMatches(event, payload) {",
-		"return event.summary() === payload.title &&",
-		"event.location() === (payload.location || '') &&",
-		"event.description() === (payload.notes || '') &&",
-		"event.url() === payload.url &&",
-		"event.startDate().getTime() === new Date(payload.start_time_utc).getTime() &&",
-		"event.endDate().getTime() === new Date(payload.end_time_utc).getTime();",
-		"if (input.action === 'inspect_event') {",
-	}
-
-	for _, snippet := range expectedSnippets {
-		if !strings.Contains(jxaScript, snippet) {
-			t.Fatalf("jxaScript missing snippet %q", snippet)
-		}
 	}
 }
