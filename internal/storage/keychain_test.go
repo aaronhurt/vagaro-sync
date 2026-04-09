@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"slices"
 	"testing"
 	"time"
@@ -13,11 +14,19 @@ func TestKeychainStoreSaveUsesExpectedArguments(t *testing.T) {
 	t.Parallel()
 
 	var gotArgs []string
+	var gotStdin []byte
 	store := &KeychainStore{
 		service: "service",
 		account: "account",
-		run: func(_ context.Context, args ...string) ([]byte, error) {
+		run: func(_ context.Context, stdin io.Reader, args ...string) ([]byte, error) {
 			gotArgs = append([]string(nil), args...)
+			if stdin != nil {
+				var err error
+				gotStdin, err = io.ReadAll(stdin)
+				if err != nil {
+					t.Fatalf("read stdin: %v", err)
+				}
+			}
 			return nil, nil
 		},
 	}
@@ -30,25 +39,22 @@ func TestKeychainStoreSaveUsesExpectedArguments(t *testing.T) {
 		t.Fatalf("Save() error = %v", err)
 	}
 
-	wantPrefix := []string{
+	// Payload must be passed via stdin, not as a -w argument.
+	wantArgs := []string{
 		"add-generic-password",
 		"-U",
 		"-s",
 		"service",
 		"-a",
 		"account",
-		"-w",
 	}
-	if len(gotArgs) != len(wantPrefix)+1 {
-		t.Fatalf("len(args) = %d, want %d", len(gotArgs), len(wantPrefix)+1)
-	}
-	if !slices.Equal(gotArgs[:len(wantPrefix)], wantPrefix) {
-		t.Fatalf("args prefix = %q, want %q", gotArgs[:len(wantPrefix)], wantPrefix)
+	if !slices.Equal(gotArgs, wantArgs) {
+		t.Fatalf("args = %q, want %q", gotArgs, wantArgs)
 	}
 
 	var saved AuthBundle
-	if err := json.Unmarshal([]byte(gotArgs[len(gotArgs)-1]), &saved); err != nil {
-		t.Fatalf("Unmarshal(saved payload) error = %v", err)
+	if err := json.Unmarshal(gotStdin, &saved); err != nil {
+		t.Fatalf("Unmarshal(stdin payload) error = %v", err)
 	}
 	if saved.SUToken != bundle.SUToken {
 		t.Fatalf("saved SUToken = %q, want %q", saved.SUToken, bundle.SUToken)
@@ -64,7 +70,7 @@ func TestKeychainStoreLoadDecodesBundle(t *testing.T) {
 	store := &KeychainStore{
 		service: "service",
 		account: "account",
-		run: func(_ context.Context, _ ...string) ([]byte, error) {
+		run: func(_ context.Context, _ io.Reader, _ ...string) ([]byte, error) {
 			return []byte(`{"captured_at":"2026-03-17T13:00:00Z","s_utkn":"token","user_agent":"agent","cookies":[{"name":"session","value":"cookie","domain":"example.com","path":"/","expires_at":"2026-03-18T00:00:00Z"}]}`), nil
 		},
 	}
@@ -88,7 +94,7 @@ func TestKeychainStoreLoadReturnsNotFound(t *testing.T) {
 	store := &KeychainStore{
 		service: "service",
 		account: "account",
-		run: func(_ context.Context, _ ...string) ([]byte, error) {
+		run: func(_ context.Context, _ io.Reader, _ ...string) ([]byte, error) {
 			return nil, &securityCommandError{
 				err:    errors.New("security failed"),
 				output: "security: secKeychainSearchCopyNext: the specified item could not be found in the keychain",
@@ -108,7 +114,7 @@ func TestKeychainStoreDeleteIgnoresMissingItem(t *testing.T) {
 	store := &KeychainStore{
 		service: "service",
 		account: "account",
-		run: func(_ context.Context, _ ...string) ([]byte, error) {
+		run: func(_ context.Context, _ io.Reader, _ ...string) ([]byte, error) {
 			return nil, &securityCommandError{
 				err:    errors.New("security failed"),
 				output: "security: secKeychainSearchCopyNext: the specified item could not be found in the keychain",
@@ -127,7 +133,7 @@ func TestKeychainStoreDeleteReturnsNonNotFoundError(t *testing.T) {
 	store := &KeychainStore{
 		service: "service",
 		account: "account",
-		run: func(_ context.Context, _ ...string) ([]byte, error) {
+		run: func(_ context.Context, _ io.Reader, _ ...string) ([]byte, error) {
 			return nil, &securityCommandError{
 				err:    errors.New("security failed"),
 				output: "security: access denied",

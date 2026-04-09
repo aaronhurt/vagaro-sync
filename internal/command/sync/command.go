@@ -23,8 +23,10 @@ type authStore interface {
 	Load(context.Context) (storage.AuthBundle, error)
 }
 
+// appointmentFetcher matches vagaro.Client directly so the production path needs no adapter.
+// Tests inject a fake implementation via the Command struct.
 type appointmentFetcher interface {
-	FetchUpcomingAppointments(context.Context, storage.AuthBundle, int) ([]vagaro.Appointment, error)
+	FetchUpcomingAppointments(context.Context, int) ([]vagaro.Appointment, error)
 }
 
 type calendarAdapter interface {
@@ -38,21 +40,6 @@ type calendarFactory interface {
 	New() calendarAdapter
 }
 
-type vagaroFetcher struct{}
-
-func (vagaroFetcher) FetchUpcomingAppointments(
-	ctx context.Context,
-	bundle storage.AuthBundle,
-	pageSize int,
-) ([]vagaro.Appointment, error) {
-	client, err := vagaro.NewClient(bundle)
-	if err != nil {
-		return nil, err
-	}
-
-	return client.FetchUpcomingAppointments(ctx, pageSize)
-}
-
 type jxaCalendarFactory struct{}
 
 func (jxaCalendarFactory) New() calendarAdapter {
@@ -63,29 +50,21 @@ func (jxaCalendarFactory) New() calendarAdapter {
 type Command struct {
 	authStore          authStore
 	stateStore         *state.FileStore
-	appointmentFetcher appointmentFetcher
+	appointmentFetcher appointmentFetcher // nil in production; set by tests
 	calendarFactory    calendarFactory
 }
 
 // NewCommand constructs the sync command.
 func NewCommand(store *storage.KeychainStore, stateStore *state.FileStore) *Command {
 	return &Command{
-		authStore:          store,
-		stateStore:         stateStore,
-		appointmentFetcher: vagaroFetcher{},
-		calendarFactory:    jxaCalendarFactory{},
+		authStore:       store,
+		stateStore:      stateStore,
+		calendarFactory: jxaCalendarFactory{},
 	}
 }
 
 // Run executes the sync command.
 func (c *Command) Run(ctx context.Context, args []string) error {
-	if c.appointmentFetcher == nil {
-		c.appointmentFetcher = vagaroFetcher{}
-	}
-	if c.calendarFactory == nil {
-		c.calendarFactory = jxaCalendarFactory{}
-	}
-
 	cmd := flag.NewFlagSet("sync", flag.ContinueOnError)
 	cmd.SetOutput(os.Stderr)
 
@@ -117,7 +96,18 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	appointments, err := c.appointmentFetcher.FetchUpcomingAppointments(ctx, bundle, *pageSize)
+	// In production, construct a client from the loaded bundle. Tests may inject
+	// a fake implementation directly via c.appointmentFetcher.
+	fetcher := c.appointmentFetcher
+	if fetcher == nil {
+		client, err := vagaro.NewClient(bundle)
+		if err != nil {
+			return err
+		}
+		fetcher = client
+	}
+
+	appointments, err := fetcher.FetchUpcomingAppointments(ctx, *pageSize)
 	if err != nil {
 		return wrapAuthenticationError(err)
 	}

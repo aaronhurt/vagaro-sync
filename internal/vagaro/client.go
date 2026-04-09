@@ -98,34 +98,31 @@ type jwtClaims struct {
 	Exp json.Number `json:"exp"`
 }
 
+// syncHashInput captures the raw API fields used to detect appointment changes.
+// Parsed time.Time values are intentionally excluded: the raw strings already
+// fully determine them, and including derived values would cause spurious hash
+// mismatches if parsing logic ever changes.
 type syncHashInput struct {
-	AppointmentID            string    `json:"appointment_id"`
-	BusinessID               string    `json:"business_id"`
-	BusinessName             string    `json:"business_name"`
-	ServiceTitle             string    `json:"service_title"`
-	ServiceProviderFirstName string    `json:"service_provider_first_name"`
-	ServiceProviderLastName  string    `json:"service_provider_last_name"`
-	AppStatusTitle           string    `json:"app_status_title"`
-	StartTimeRaw             string    `json:"start_time"`
-	StartTimeUTCRaw          string    `json:"start_time_utc_raw"`
-	EndTimeRaw               string    `json:"end_time"`
-	EndTimeUTCRaw            string    `json:"end_time_utc_raw"`
-	EventType                int       `json:"event_type"`
-	Group                    string    `json:"group"`
-	StartTimeUTC             time.Time `json:"start_time_utc"`
-	EndTimeUTC               time.Time `json:"end_time_utc"`
+	AppointmentID            string `json:"appointment_id"`
+	BusinessID               string `json:"business_id"`
+	BusinessName             string `json:"business_name"`
+	ServiceTitle             string `json:"service_title"`
+	ServiceProviderFirstName string `json:"service_provider_first_name"`
+	ServiceProviderLastName  string `json:"service_provider_last_name"`
+	AppStatusTitle           string `json:"app_status_title"`
+	StartTimeRaw             string `json:"start_time"`
+	StartTimeUTCRaw          string `json:"start_time_utc_raw"`
+	EndTimeRaw               string `json:"end_time"`
+	EndTimeUTCRaw            string `json:"end_time_utc_raw"`
+	EventType                int    `json:"event_type"`
+	Group                    string `json:"group"`
 }
 
 // NewClient returns a Vagaro appointments client backed by the provided auth bundle.
 func NewClient(bundle storage.AuthBundle) (*Client, error) {
-	httpClient, err := newHTTPClient()
-	if err != nil {
-		return nil, err
-	}
-
 	return &Client{
 		baseURL:    defaultBaseURL,
-		httpClient: httpClient,
+		httpClient: newHTTPClient(),
 		sUToken:    bundle.SUToken,
 		userAgent:  bundle.UserAgent,
 	}, nil
@@ -178,7 +175,7 @@ func FormatTokenLifetime(lifetime time.Duration) string {
 
 // ProbeSession validates the currently stored session using the appointments endpoint contract.
 func (c *Client) ProbeSession(ctx context.Context) error {
-	_, _, err := c.fetchAppointmentsResponse(ctx, 1, 1)
+	_, err := c.fetchAppointmentsResponse(ctx, 1, 1)
 	return err
 }
 
@@ -225,12 +222,9 @@ func (c *Client) fetchUpcomingAppointmentsPage(
 	pageNumber int,
 	pageSize int,
 ) ([]appointmentPayload, int, error) {
-	decoded, body, err := c.fetchAppointmentsResponse(ctx, pageNumber, pageSize)
+	decoded, err := c.fetchAppointmentsResponse(ctx, pageNumber, pageSize)
 	if err != nil {
 		return nil, 0, err
-	}
-	if len(bytes.TrimSpace(body)) == 0 {
-		return nil, 0, fmt.Errorf("decode appointments page %d: empty response body", pageNumber)
 	}
 
 	return decoded.Data, totalPages(decoded.Data), nil
@@ -240,15 +234,15 @@ func (c *Client) fetchAppointmentsResponse(
 	ctx context.Context,
 	pageNumber int,
 	pageSize int,
-) (appointmentsResponse, []byte, error) {
+) (appointmentsResponse, error) {
 	req, err := c.newAppointmentsRequest(ctx, pageNumber, pageSize)
 	if err != nil {
-		return appointmentsResponse{}, nil, err
+		return appointmentsResponse{}, err
 	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return appointmentsResponse{}, nil, fmt.Errorf("fetch appointments page %d: %w", pageNumber, err)
+		return appointmentsResponse{}, fmt.Errorf("fetch appointments page %d: %w", pageNumber, err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -256,19 +250,14 @@ func (c *Client) fetchAppointmentsResponse(
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return appointmentsResponse{}, nil, fmt.Errorf("read appointments page %d: %w", pageNumber, err)
+		return appointmentsResponse{}, fmt.Errorf("read appointments page %d: %w", pageNumber, err)
 	}
 
 	if err := classifyHTTPResponse("fetch appointments page", pageNumber, resp); err != nil {
-		return appointmentsResponse{}, nil, err
+		return appointmentsResponse{}, err
 	}
 
-	decoded, err := decodeAppointmentsResponse(pageNumber, body)
-	if err != nil {
-		return appointmentsResponse{}, nil, err
-	}
-
-	return decoded, body, nil
+	return decodeAppointmentsResponse(pageNumber, body)
 }
 
 func (c *Client) newAppointmentsRequest(
@@ -443,8 +432,6 @@ func normalizeAppointment(payload appointmentPayload) (Appointment, error) {
 		EndTimeUTCRaw:            payload.EndTimeUTC,
 		EventType:                payload.EventType,
 		Group:                    payload.Group,
-		StartTimeUTC:             startTime,
-		EndTimeUTC:               endTime,
 	})
 	if err != nil {
 		return Appointment{}, err
@@ -460,10 +447,10 @@ func normalizeAppointment(payload appointmentPayload) (Appointment, error) {
 	}, nil
 }
 
-func newHTTPClient() (*http.Client, error) {
+func newHTTPClient() *http.Client {
 	return &http.Client{
 		Timeout: 30 * time.Second,
-	}, nil
+	}
 }
 
 func hashAppointmentSyncFields(input syncHashInput) (string, error) {
