@@ -31,7 +31,6 @@ type fakeAppointmentFetcher struct {
 
 func (f *fakeAppointmentFetcher) FetchUpcomingAppointments(
 	_ context.Context,
-	_ storage.AuthBundle,
 	pageSize int,
 ) ([]vagaro.Appointment, error) {
 	f.pageSize = pageSize

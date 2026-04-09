@@ -95,6 +95,9 @@ func calendarEventForAppointment(appointment vagaro.Appointment) calendar.Event 
 	}
 	notes += "Managed by vagaro-sync\nAppointment ID: " + appointment.AppointmentID
 
+	// Location is intentionally left blank: the Vagaro API does not return a
+	// physical address for appointments, only a business name and telephone number
+	// (both surfaced in Notes).
 	return calendar.Event{
 		URL:          eventURL,
 		Title:        appointment.Title,
