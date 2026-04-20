@@ -194,7 +194,7 @@ func wrapAuthenticationError(err error) error {
 		return err
 	}
 
-	return fmt.Errorf("authentication invalid: %w; run `vagaro-sync auth-login`", err)
+	return fmt.Errorf("%w; run `vagaro-sync auth-login`", err)
 }
 
 func reclassifyRetainedEvents(

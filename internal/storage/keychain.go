@@ -1,20 +1,17 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os/exec"
 	"strings"
 )
 
 var errAuthBundleNotFound = errors.New("auth bundle not found")
 
-// commandRunner executes a security(1) subcommand. stdin is wired to the process when non-nil.
-type commandRunner func(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error)
+type commandRunner func(context.Context, ...string) ([]byte, error)
 
 type securityCommandError struct {
 	err    error
@@ -52,7 +49,7 @@ func NewKeychainStore(service string, account string) *KeychainStore {
 
 // Load retrieves the auth bundle from the macOS keychain.
 func (s *KeychainStore) Load(ctx context.Context) (AuthBundle, error) {
-	output, err := s.run(ctx, nil, "find-generic-password", "-w", "-s", s.service, "-a", s.account)
+	output, err := s.run(ctx, "find-generic-password", "-w", "-s", s.service, "-a", s.account)
 	if err != nil {
 		if isItemNotFound(err) {
 			return AuthBundle{}, errAuthBundleNotFound
@@ -70,8 +67,12 @@ func (s *KeychainStore) Load(ctx context.Context) (AuthBundle, error) {
 }
 
 // Save stores the auth bundle in the macOS keychain.
-// The JSON payload is passed via stdin rather than as a -w argument to avoid
-// exposing the token in the process argument list.
+//
+// NOTE: The payload is passed as a -w argument rather than via stdin.
+// security(1) calls getpass() internally when -w is omitted, which opens
+// /dev/tty directly and bypasses any stdin pipe — making the stdin approach
+// silently ineffective. The proper fix is to use the macOS Security framework
+// directly (e.g. via a cgo keychain library) to avoid the CLI argument entirely.
 func (s *KeychainStore) Save(ctx context.Context, bundle AuthBundle) error {
 	payload, err := json.Marshal(bundle)
 	if err != nil {
@@ -80,11 +81,11 @@ func (s *KeychainStore) Save(ctx context.Context, bundle AuthBundle) error {
 
 	_, err = s.run(
 		ctx,
-		bytes.NewReader(append(payload, '\n')),
 		"add-generic-password",
 		"-U",
 		"-s", s.service,
 		"-a", s.account,
+		"-w", string(payload),
 	)
 	if err != nil {
 		return fmt.Errorf("save auth bundle to keychain: %w", err)
@@ -95,7 +96,7 @@ func (s *KeychainStore) Save(ctx context.Context, bundle AuthBundle) error {
 
 // Delete removes the auth bundle from the macOS keychain.
 func (s *KeychainStore) Delete(ctx context.Context) error {
-	_, err := s.run(ctx, nil, "delete-generic-password", "-s", s.service, "-a", s.account)
+	_, err := s.run(ctx, "delete-generic-password", "-s", s.service, "-a", s.account)
 	if err != nil && !isItemNotFound(err) {
 		return fmt.Errorf("delete auth bundle from keychain: %w", err)
 	}
@@ -103,10 +104,9 @@ func (s *KeychainStore) Delete(ctx context.Context) error {
 	return nil
 }
 
-func runSecurityCommand(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
+func runSecurityCommand(ctx context.Context, args ...string) ([]byte, error) {
 	// #nosec G204 -- the command name is fixed and args are assembled only from internal call sites.
 	cmd := exec.CommandContext(ctx, "security", args...)
-	cmd.Stdin = stdin
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, &securityCommandError{
